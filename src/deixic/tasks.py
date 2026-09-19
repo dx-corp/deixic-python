@@ -205,7 +205,10 @@ class TasksClient:
                     ),
                     None,
                 )
-            unavailable_model = selected is not None and not selected.ready
+            # Platform deliberately omits both the catalog and default target when
+            # managed inference is unavailable.  An explicit selection that no
+            # longer appears in the catalog is unavailable for the same reason.
+            unavailable_model = selected is None or not selected.ready
             return SetupCheck(
                 "needs_attention" if missing or unavailable_model else "accessible",
                 channel_id,

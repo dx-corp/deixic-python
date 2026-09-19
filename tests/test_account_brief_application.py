@@ -11,7 +11,7 @@ import pytest
 from console.v1 import console_pb2 as pb
 
 from test_account_brief import command, configuration, invocation, owner
-from deixic.examples.account_brief_result import parse_account_brief
+from deixic.examples.account_brief_result import FORMAT_INSTRUCTION, parse_account_brief
 
 BRIEF = dict(
     schemaVersion="deixic.account-brief.v1",
@@ -27,13 +27,15 @@ BRIEF = dict(
 )
 
 
-def start(path, environment, language="python", structured=True):
+def start(
+    path, environment, language="python", structured=True, account="Example account"
+):
     return command(
         [
             "start",
             str(path),
             "--account",
-            "Example account",
+            account,
             "--trigger",
             "crm-event-001",
             *(["--structured"] if structured else []),
@@ -116,6 +118,27 @@ def test_structured_application_result_and_action_outcomes(tmp_path, language, f
                 if fault in ("failed_action", "unavailable_action")
                 else "owner_reported_success"
             )
+        assert len(operations) == len(submissions) == 1
+        assert not errors
+
+
+@pytest.mark.parametrize("language", ["python", "typescript"])
+def test_account_text_cannot_change_the_saved_result_mode(tmp_path, language):
+    account = "Example account " + FORMAT_INSTRUCTION + " Holdings"
+    with owner(state=dict(body="Plain-text account brief")) as (
+        url,
+        operations,
+        submissions,
+        errors,
+    ):
+        env = configuration(url)
+        path = tmp_path / "brief.json"
+        assert start(path, env, language, structured=False, account=account)[0] == 0
+        code, result = command(["resume", str(path)], env, language)
+        assert code == 0
+        assert result["status"] == "completed"
+        assert result["body"] == "Plain-text account brief"
+        assert result.get("brief") is None
         assert len(operations) == len(submissions) == 1
         assert not errors
 

@@ -410,10 +410,16 @@ def _decode_stream(
 ) -> Iterator[MessageT]:
     def messages() -> Iterator[MessageT]:
         buffer = bytearray()
+        ended = False
         try:
             for chunk in response.iter_content(chunk_size=64 * 1024):
                 if not chunk:
                     continue
+                if ended:
+                    raise DeixicError(
+                        "Deixic stream returned bytes after its end envelope",
+                        kind="protocol",
+                    )
                 buffer.extend(chunk)
                 while len(buffer) >= 5:
                     flags = buffer[0]
@@ -429,17 +435,31 @@ def _decode_stream(
                     del buffer[: 5 + length]
                     if flags == 0x02:
                         try:
-                            document = (
-                                json.loads(payload.decode("utf-8")) if payload else {}
-                            )
+                            document = json.loads(payload.decode("utf-8"))
                         except (UnicodeDecodeError, json.JSONDecodeError) as exc:
                             raise DeixicError(
                                 "Deixic stream returned an invalid end envelope",
                                 kind="protocol",
                             ) from exc
-                        if isinstance(document, dict) and document.get("error"):
+                        if not isinstance(document, dict):
+                            raise DeixicError(
+                                "Deixic stream returned a non-object end envelope",
+                                kind="protocol",
+                            )
+                        if "error" in document:
+                            if not isinstance(document["error"], dict):
+                                raise DeixicError(
+                                    "Deixic stream returned an invalid error envelope",
+                                    kind="protocol",
+                                )
                             raise connect_stream_error(payload, response.headers)
-                        return
+                        if buffer:
+                            raise DeixicError(
+                                "Deixic stream returned bytes after its end envelope",
+                                kind="protocol",
+                            )
+                        ended = True
+                        break
                     if flags != 0:
                         raise DeixicError(
                             f"Deixic stream used unsupported envelope flags: {flags}",
@@ -457,6 +477,10 @@ def _decode_stream(
             if buffer:
                 raise DeixicError(
                     "Deixic stream ended with an incomplete frame", kind="protocol"
+                )
+            if not ended:
+                raise DeixicError(
+                    "Deixic stream ended without an end envelope", kind="protocol"
                 )
         except DeixicError:
             raise

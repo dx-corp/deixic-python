@@ -595,6 +595,22 @@ def test_setup_reports_owner_model_availability_without_inventing_a_route():
     assert report.model_selection is None
 
 
+@pytest.mark.parametrize("explicit_selection", [False, True])
+def test_setup_rejects_an_absent_execution_route(explicit_selection):
+    response_body = pb.GetOperatingThreadResponse(
+        channel=pb.OperatingChannel(id="company")
+    )
+    if explicit_selection:
+        response_body.model_selection.CopyFrom(
+            pb.OperatingModelSelection(provider="fixture", model="removed")
+        )
+    transport = FakeTransport([response(response_body)])
+    report = client(transport).tasks.check_setup(channel_id="company")
+    assert report.status == "needs_attention"
+    assert report.selected_model is None
+    assert "model availability" in report.next_action
+
+
 def test_wait_continues_past_preliminary_response_until_owner_completion():
     transport = FakeTransport(
         [
