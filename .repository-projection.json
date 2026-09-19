@@ -1,0 +1,13 @@
+{
+  "schemaVersion": 1,
+  "projection": "deixic-python",
+  "projectionSchemaVersion": 1,
+  "sourceRepository": "dx-corp/mono",
+  "sourceSha": "6878323651fdb771b8cbf76b08597b930938ce36",
+  "destinationRepository": "dx-corp/deixic-python",
+  "priorProjectedBase": "1a71e41b4d48efd28d8b3efdccaf714758784873",
+  "definitionDigest": "b278f71b9fce8cc8d4cfbe22eff3e054ef8a20caa2142f7f6a3d54005ee55119",
+  "toolDigest": "16fcaea2f0e7e35de09bcd8e515d915f65cdf1eb13033eaf2845f60eaa9e0a4f",
+  "contentDigest": "2d91766f58c81be8dd6c7a6181bdfa231c7c73a38195603bde98eba5c948b7cc",
+  "publicationEligible": true
+}
