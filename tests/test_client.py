@@ -65,18 +65,21 @@ class FakeTransport:
 class RotatingCredentials:
     can_refresh = True
 
-    def __init__(self, refreshed: Credential) -> None:
+    def __init__(
+        self, refreshed: Credential, original: Credential | None = None
+    ) -> None:
         self.refreshed = refreshed
-        self.refreshes = 0
-
-    def get_credential(self) -> Credential:
-        return Credential(
+        self.original = original or Credential(
             access_token="old-token",
             subject="subject-a",
             organization_id="org-a",
             workspace_id="workspace-a",
             scopes=("console:write",),
         )
+        self.refreshes = 0
+
+    def get_credential(self) -> Credential:
+        return self.original
 
     def refresh_credential(self, current: Credential) -> Credential:
         self.refreshes += 1
@@ -245,6 +248,41 @@ def test_refresh_rejects_subject_change_before_replay() -> None:
     assert first.closed is True
 
 
+def test_rejected_refresh_does_not_poison_later_credential_reads() -> None:
+    first = FakeResponse(
+        401, b'{"code":"unauthenticated"}', {"content-type": "application/json"}
+    )
+    transport = FakeTransport(
+        [first, response(console_pb2.GetOperatingThreadResponse(replay_cursor=4))]
+    )
+    credentials = RotatingCredentials(
+        original=Credential(
+            access_token="old-token",
+            subject="subject-a",
+            scopes=("console:write",),
+        ),
+        refreshed=Credential(
+            access_token="new-token",
+            subject="subject-a",
+            organization_id="org-a",
+            scopes=("console:read",),
+        ),
+    )
+    client = Deixic(
+        credential_provider=credentials,
+        organization_id="org-a",
+        workspace_id="workspace-a",
+        transport=transport,
+    )
+
+    with pytest.raises(DeixicError, match="changed its declared OAuth scopes"):
+        client.threads.get(channel_id="company")
+
+    result = client.threads.get(channel_id="company")
+    assert result.replay_cursor == 4
+    assert len(transport.requests) == 2
+
+
 def test_watch_decodes_bounded_connect_stream_frames() -> None:
     first = console_pb2.WatchOperatingThreadResponse(next_cursor=4)
     second = console_pb2.WatchOperatingThreadResponse(
@@ -358,6 +396,63 @@ def test_watch_rejects_malformed_end_envelope_as_protocol_error() -> None:
     assert stream_response.closed is True
 
 
+def _frame(payload: bytes, *, flags: int = 0) -> bytes:
+    return bytes([flags]) + struct.pack(">I", len(payload)) + payload
+
+
+@pytest.mark.parametrize(
+    "chunks",
+    [
+        (_frame(console_pb2.WatchOperatingThreadResponse(next_cursor=4).SerializeToString()),),
+        (_frame(b"", flags=2),),
+        (_frame(b"[]", flags=2),),
+        (_frame(b'{"error":{}}', flags=2),),
+        (_frame(b"{}", flags=2) + b"extra",),
+        (_frame(b"{}", flags=2), b"extra"),
+    ],
+    ids=["missing-end", "empty-end", "non-object-end", "empty-error", "trailing-buffer", "trailing-chunk"],
+)
+def test_watch_rejects_truncated_or_corrupt_stream_end(chunks: tuple[bytes, ...]) -> None:
+    stream_response = FakeResponse(
+        200,
+        headers={"content-type": "application/connect+proto"},
+        chunks=chunks,
+    )
+    client = Deixic(
+        api_key="sdk-test-key",
+        organization_id="org-a",
+        workspace_id="workspace-a",
+        transport=FakeTransport([stream_response]),
+    )
+
+    with pytest.raises(DeixicError) as caught:
+        list(client.events.watch(channel_id="company", after_cursor=0))
+
+    assert caught.value.kind == "protocol"
+    assert stream_response.closed is True
+
+
+def test_watch_preserves_server_error_from_end_envelope() -> None:
+    stream_response = FakeResponse(
+        200,
+        headers={"content-type": "application/connect+proto", "x-request-id": "request-1"},
+        chunks=(_frame(b'{"error":{"code":"unavailable","message":"retry"}}', flags=2),),
+    )
+    client = Deixic(
+        api_key="sdk-test-key",
+        organization_id="org-a",
+        workspace_id="ws-fixture",
+        transport=FakeTransport([stream_response]),
+    )
+
+    with pytest.raises(DeixicError) as caught:
+        list(client.events.watch(channel_id="company", after_cursor=0))
+
+    assert caught.value.kind == "unavailable"
+    assert caught.value.request_id == "request-1"
+    assert stream_response.closed is True
+
+
 @pytest.mark.parametrize(
     "base_url",
     [
@@ -393,10 +488,6 @@ def test_client_reports_invalid_auth_configuration_as_typed_validation(
         )
 
     assert caught.value.kind == "validation"
-
-
-def _frame(payload: bytes, *, flags: int = 0) -> bytes:
-    return bytes([flags]) + struct.pack(">I", len(payload)) + payload
 
 
 def test_coding_submission_preserves_explicit_acceptance_and_declares_kind() -> None:

@@ -89,11 +89,6 @@ class CredentialIdentity:
             raise authentication_error(
                 "credential refresh removed its declared workspace_id"
             )
-        self._declared_organization = self._declared_organization or bool(
-            organization_id
-        )
-        self._declared_workspace = self._declared_workspace or bool(workspace_id)
-
         subject = _clean(credential.subject)
         if self._subject and not subject:
             raise authentication_error(
@@ -103,9 +98,6 @@ class CredentialIdentity:
             raise authentication_error(
                 "credential refresh changed the authenticated subject"
             )
-        if subject:
-            self._subject = subject
-
         scopes = frozenset(
             scope.strip() for scope in credential.scopes if scope.strip()
         )
@@ -117,6 +109,15 @@ class CredentialIdentity:
             raise authentication_error(
                 "credential refresh changed its declared OAuth scopes"
             )
+        # Commit identity metadata only after every claim has passed. A rejected
+        # refresh must not make the original credential look as if it removed a
+        # tenant declaration, subject, or scope on the next request.
+        self._declared_organization = self._declared_organization or bool(
+            organization_id
+        )
+        self._declared_workspace = self._declared_workspace or bool(workspace_id)
+        if subject:
+            self._subject = subject
         if scopes and self._scopes is None:
             self._scopes = scopes
         return credential

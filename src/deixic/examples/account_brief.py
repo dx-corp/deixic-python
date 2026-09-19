@@ -189,7 +189,9 @@ def main() -> int:
                         )
 
                 outcome = task.wait(timeout=args.timeout, on_event=progress)
-                structured = FORMAT_INSTRUCTION in task.checkpoint()["body"]
+                # The instruction is an application-owned suffix. An account name
+                # containing the same text must not change the saved request mode.
+                structured = task.checkpoint()["body"].endswith(FORMAT_INSTRUCTION)
                 brief = None
                 if outcome.status == "completed" and structured:
                     try:

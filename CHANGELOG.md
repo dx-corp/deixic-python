@@ -2,11 +2,34 @@
 
 ## Unreleased
 
+- Report missing or removed model routes during setup instead of declaring the
+  workspace accessible, and preserve plain-text account briefs when account
+  names contain structured-output instruction text. Keep rejected credential
+  refreshes from poisoning later requests.
 - Add validated, source-linked account briefs, missing-data handling, progress
   output, explicit owner-authorized approvals/denials, and receipt outcomes.
 - Verify clean package consumers over binary HTTP with killed workers, storage
   failures, lost responses and Python/TypeScript checkpoint interoperability.
 - Atomically publish and sync private checkpoint files before submission.
+
+## [0.1.5](https://github.com/dx-corp/mono/compare/sdk/deixic/python/v0.1.4...sdk/deixic/python/v0.1.5) (2026-09-19)
+
+
+### Bug Fixes
+
+* **sdk:** reject truncated Python watch streams ([#9714](https://github.com/dx-corp/mono/issues/9714)) ([76c1086](https://github.com/dx-corp/mono/commit/76c1086609a13612cda320622d48b9a5e9eb4f43))
+
+
+### Tests
+
+* **sdk:** cover empty and errored stream endings ([#9716](https://github.com/dx-corp/mono/issues/9716)) ([3482008](https://github.com/dx-corp/mono/commit/3482008754041a7adc9fcaa61eb96f75f8333589))
+
+## [0.1.4](https://github.com/dx-corp/mono/compare/sdk/deixic/python/v0.1.3...sdk/deixic/python/v0.1.4) (2026-09-19)
+
+
+### Bug Fixes
+
+* **sdk:** harden setup and credential recovery ([#9671](https://github.com/dx-corp/mono/issues/9671)) ([e70ec36](https://github.com/dx-corp/mono/commit/e70ec364d1ebb2669b104ab6e8aee2a2aee57986))
 
 ## [0.1.3](https://github.com/dx-corp/mono/compare/sdk/deixic/python/v0.1.2...sdk/deixic/python/v0.1.3) (2026-09-19)
 
