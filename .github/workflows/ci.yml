@@ -16,6 +16,8 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
 
       - name: Verify projection state
         id: source
@@ -23,9 +25,14 @@ jobs:
         env:
           PROJECTION_NAME: deixic-python
           DESTINATION_REPOSITORY: dx-corp/deixic-python
+          PULL_REQUEST_BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: |
           set -euo pipefail
           if [[ ! -f .repository-projection.json ]]; then
+            if [[ -n "$PULL_REQUEST_BASE_SHA" ]] && git cat-file -e "$PULL_REQUEST_BASE_SHA:.repository-projection.json" 2>/dev/null; then
+              echo "A pull request cannot remove established projection provenance" >&2
+              exit 1
+            fi
             unexpected="$(git ls-files | grep -Ev '^(README\.md|\.github/workflows/ci\.yml)$' || true)"
             if [[ -n "$unexpected" ]]; then
               echo "Projected source is present without .repository-projection.json:" >&2
