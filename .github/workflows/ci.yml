@@ -1,0 +1,109 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Verify projection state
+        id: source
+        shell: bash
+        env:
+          PROJECTION_NAME: deixic-python
+          DESTINATION_REPOSITORY: dx-corp/deixic-python
+        run: |
+          set -euo pipefail
+          if [[ ! -f .repository-projection.json ]]; then
+            unexpected="$(git ls-files | grep -Ev '^(README\.md|\.github/workflows/ci\.yml)$' || true)"
+            if [[ -n "$unexpected" ]]; then
+              echo "Projected source is present without .repository-projection.json:" >&2
+              echo "$unexpected" >&2
+              exit 1
+            fi
+            echo "The repository is still in its documented README-only bootstrap state."
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          python3 <<'PY'
+          import json
+          import os
+          import re
+
+          with open(".repository-projection.json", encoding="utf-8") as handle:
+              receipt = json.load(handle)
+          expected_keys = {
+              "schemaVersion", "projection", "projectionSchemaVersion", "sourceRepository",
+              "sourceSha", "destinationRepository", "priorProjectedBase", "definitionDigest",
+              "toolDigest", "contentDigest", "publicationEligible",
+          }
+          assert set(receipt) == expected_keys, "projection provenance fields changed"
+          assert receipt["schemaVersion"] == 1 and receipt["projectionSchemaVersion"] == 1
+          assert receipt["projection"] == os.environ["PROJECTION_NAME"]
+          assert receipt["sourceRepository"] == "dx-corp/mono"
+          assert receipt["destinationRepository"] == os.environ["DESTINATION_REPOSITORY"]
+          assert re.fullmatch(r"[0-9a-f]{40}", receipt["sourceSha"])
+          assert re.fullmatch(r"[0-9a-f]{40}", receipt["priorProjectedBase"])
+          for key in ("definitionDigest", "toolDigest", "contentDigest"):
+              assert re.fullmatch(r"[0-9a-f]{64}", receipt[key]), key
+          assert receipt["publicationEligible"] is True
+          PY
+
+          for required in pyproject.toml src/deixic/__init__.py src/deixic/client.py tests/test_client.py; do
+            test -f "$required" || { echo "Missing projected input: $required" >&2; exit 1; }
+          done
+          echo "present=true" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Python
+        if: steps.source.outputs.present == 'true'
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: 3.12.12
+
+      - name: Verify public package boundary
+        if: steps.source.outputs.present == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          if grep -Eq 'evalops-sdk|github\.com/dx-corp/mono' pyproject.toml; then
+            echo "pyproject.toml depends on the private source repository" >&2
+            exit 1
+          fi
+          grep -Fq 'https://github.com/dx-corp/deixic-python' pyproject.toml
+
+      - name: Build, install, and test wheel
+        if: steps.source.outputs.present == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m venv "$RUNNER_TEMP/test-venv"
+          "$RUNNER_TEMP/test-venv/bin/python" -m pip install --disable-pip-version-check \
+            build==1.6.1 pytest==9.1.1 setuptools==84.0.0 wheel==0.48.0
+          "$RUNNER_TEMP/test-venv/bin/python" -m build --wheel --no-isolation
+          wheel_path="$(find dist -maxdepth 1 -type f -name '*.whl' -print -quit)"
+          test -n "$wheel_path"
+          "$RUNNER_TEMP/test-venv/bin/python" -m pip install --disable-pip-version-check "$wheel_path"
+          "$RUNNER_TEMP/test-venv/bin/python" -m pip check
+          "$RUNNER_TEMP/test-venv/bin/python" -m pytest -q -k 'not typescript' tests
+
+      - name: Verify isolated consumer install
+        if: steps.source.outputs.present == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          wheel_path="$(find dist -maxdepth 1 -type f -name '*.whl' -print -quit)"
+          python -m venv "$RUNNER_TEMP/consumer-venv"
+          "$RUNNER_TEMP/consumer-venv/bin/python" -m pip install --disable-pip-version-check "$wheel_path"
+          "$RUNNER_TEMP/consumer-venv/bin/python" -c 'from deixic import Deixic; assert Deixic.__name__ == "Deixic"'
