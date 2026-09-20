@@ -63,8 +63,13 @@ jobs:
           assert receipt["destinationRepository"] == os.environ["DESTINATION_REPOSITORY"]
           assert re.fullmatch(r"[0-9a-f]{40}", receipt["sourceSha"])
           assert re.fullmatch(r"[0-9a-f]{40}", receipt["priorProjectedBase"])
-          for key in ("definitionDigest", "toolDigest", "contentDigest"):
+          for key in ("definitionDigest", "contentDigest"):
               assert re.fullmatch(r"[0-9a-f]{64}", receipt[key]), key
+          # toolDigest identifies the projector: the Node projector recorded a
+          # 64-hex sha256 of its inputs; since the Capobara cutover
+          # (dx-corp/mono#9935) it is the 40-hex git tree id of
+          # rust/tools/capobara. Both are established provenance.
+          assert re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", receipt["toolDigest"]), "toolDigest"
           assert receipt["publicationEligible"] is True
           PY
 
