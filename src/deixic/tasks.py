@@ -9,7 +9,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal, TypeVar, TypedDict, cast
 
-from console.v1 import console_pb2 as pb
+from deixic import protocol as pb
 from google.protobuf.message import Message
 
 from .errors import DeixicError, validation_error
@@ -52,10 +52,10 @@ class TaskResult:
     turn_id: str = ""
     reason: str = ""
     body: str | None = None
-    message: pb.OperatingMessage | None = None
-    receipts: tuple[pb.OperatingReceipt, ...] = ()
-    turn: pb.OperatingThreadTurn | None = None
-    event: pb.OperatingThreadEvent | None = None
+    message: pb.TaskMessage | None = None
+    receipts: tuple[pb.Receipt, ...] = ()
+    turn: pb.TaskTurn | None = None
+    event: pb.TaskEvent | None = None
     error: DeixicError | None = None
 
     def parse(self, parser: Callable[[str], T]) -> T:
@@ -69,12 +69,12 @@ class TaskResult:
 class SetupCheck:
     status: Literal["accessible", "needs_attention", "error"]
     channel_id: str
-    capabilities: tuple[pb.OperatingCapabilityState, ...] = ()
+    capabilities: tuple[pb.SetupReadiness, ...] = ()
     next_action: str = ""
     error: DeixicError | None = None
-    model_selection: pb.OperatingModelSelection | None = None
-    default_model: pb.InferenceProviderTarget | None = None
-    selected_model: pb.InferenceProviderTarget | None = None
+    model_selection: pb.ModelSelection | None = None
+    default_model: pb.AvailableModel | None = None
+    selected_model: pb.AvailableModel | None = None
     # Read access does not prove mutation grants or connector execution.
     write_access: Literal["not_checked"] = "not_checked"
 
@@ -175,23 +175,20 @@ class TasksClient:
         channel_id = _identity(channel_id, "channel_id")
         try:
             thread = self._client.threads.get(channel_id=channel_id, limit=1)
-            if thread.channel.id != channel_id:
+            if thread.thread.id != channel_id:
                 raise _protocol("Setup lookup omitted or changed the channel identity")
-            capabilities = tuple(_copy(item) for item in thread.capabilities)
-            if thread.channel.HasField("capability_state"):
-                capabilities += (_copy(thread.channel.capability_state),)
-            missing = any(
-                item.missing_requirements or item.missing_requirement_states
-                for item in capabilities
+            capabilities = (_copy(thread.setup),) if thread.HasField("setup") else ()
+            missing = not thread.setup.accessible or bool(
+                thread.setup.missing_requirements
             )
             model = (
-                _copy(thread.default_model)
-                if thread.HasField("default_model")
+                _copy(thread.setup.default_model)
+                if thread.setup.HasField("default_model")
                 else None
             )
             selection = (
-                _copy(thread.model_selection)
-                if thread.HasField("model_selection")
+                _copy(thread.setup.selection)
+                if thread.setup.HasField("selection")
                 else None
             )
             selected = model
@@ -199,14 +196,14 @@ class TasksClient:
                 selected = next(
                     (
                         _copy(item)
-                        for item in thread.available_models
+                        for item in thread.setup.available_models
                         if (item.provider, item.model)
                         == (selection.provider, selection.model)
                     ),
                     None,
                 )
-            # Platform deliberately omits both the catalog and default target when
-            # managed inference is unavailable.  An explicit selection that no
+            # Platform omits both the catalog and default target when
+            # model access is unavailable. An explicit selection that no
             # longer appears in the catalog is unavailable for the same reason.
             unavailable_model = selected is None or not selected.ready
             return SetupCheck(
@@ -246,7 +243,7 @@ class Task:
         self._client = client
         self._state = cast(TaskCheckpoint, dict(state))
         self._on_checkpoint = on_checkpoint
-        self._event: pb.OperatingThreadEvent | None = None
+        self._event: pb.TaskEvent | None = None
         self._submitting = False
         self._observing = False
 
@@ -322,7 +319,7 @@ class Task:
                 page_token=page_token,
                 timeout=_remaining(deadline),
             )
-            if page.channel.id and page.channel.id != self._state["channelId"]:
+            if page.thread.id != self._state["channelId"]:
                 raise _protocol("Thread lookup changed the channel identity")
             candidate = next(
                 (item for item in page.turns if item.turn_id == turn_id), None
@@ -335,7 +332,7 @@ class Task:
             for item in page.messages:
                 messages.setdefault(item.id, item)
             if turn is not None and (
-                turn.state != pb.OPERATING_TURN_STATE_COMPLETED
+                turn.state != pb.TURN_STATE_COMPLETED
                 or not turn.assistant_message_id
                 or turn.assistant_message_id in messages
             ):
@@ -351,11 +348,11 @@ class Task:
         if turn is None:
             return TaskResult("unfinished", turn_id, "turn_not_visible")
         status = {
-            pb.OPERATING_TURN_STATE_COMPLETED: "completed",
-            pb.OPERATING_TURN_STATE_RESPONDED: "responded",
-            pb.OPERATING_TURN_STATE_FAILED: "failed",
-            pb.OPERATING_TURN_STATE_INTERRUPTED: "interrupted",
-            pb.OPERATING_TURN_STATE_WAITING: "waiting",
+            pb.TURN_STATE_COMPLETED: "completed",
+            pb.TURN_STATE_RESPONDED: "responded",
+            pb.TURN_STATE_FAILED: "failed",
+            pb.TURN_STATE_INTERRUPTED: "interrupted",
+            pb.TURN_STATE_WAITING: "waiting",
         }.get(turn.state, "unfinished")
         event = _copy(self._event) if self._event else None
         if status == "waiting":
@@ -370,11 +367,7 @@ class Task:
         if status != "completed":
             return TaskResult(status, turn_id, turn=turn, event=event)
         message = messages.get(turn.assistant_message_id)
-        if (
-            message is None
-            or message.role != "assistant"
-            or message.channel_id != self._state["channelId"]
-        ):
+        if message is None or message.role != pb.MESSAGE_ROLE_ASSISTANT:
             raise _protocol("Completed turn omitted its linked final assistant message")
         receipts = []
         for receipt_id in dict.fromkeys(message.receipt_ids):
@@ -397,8 +390,8 @@ class Task:
         )
 
     def _waiting_request(
-        self, turn: pb.OperatingThreadTurn, max_pages: int, deadline: float | None
-    ) -> pb.OperatingThreadEvent | None:
+        self, turn: pb.TaskTurn, max_pages: int, deadline: float | None
+    ) -> pb.TaskEvent | None:
         # Re-read request identity from owner history, including after restart.
         # A saved cursor or locally cached event cannot authorize a response.
         cursor = max(0, turn.first_cursor - 1)
@@ -422,14 +415,14 @@ class Task:
             cursor = page.next_cursor
             if not page.has_more:
                 expected_type = {
-                    pb.OPERATING_THREAD_WAITING_REASON_APPROVAL: pb.OPERATING_THREAD_REQUEST_TYPE_APPROVAL,
-                    pb.OPERATING_THREAD_WAITING_REASON_USER_INPUT: pb.OPERATING_THREAD_REQUEST_TYPE_USER_INPUT,
-                    pb.OPERATING_THREAD_WAITING_REASON_CLIENT_TOOL: pb.OPERATING_THREAD_REQUEST_TYPE_CLIENT_TOOL,
-                    pb.OPERATING_THREAD_WAITING_REASON_EXTERNAL_RETRY: pb.OPERATING_THREAD_REQUEST_TYPE_EXTERNAL_RETRY,
+                    pb.WAITING_REASON_APPROVAL: pb.REQUEST_KIND_APPROVAL,
+                    pb.WAITING_REASON_USER_INPUT: pb.REQUEST_KIND_USER_INPUT,
+                    pb.WAITING_REASON_CLIENT_TOOL: pb.REQUEST_KIND_CLIENT_TOOL,
+                    pb.WAITING_REASON_EXTERNAL_RETRY: pb.REQUEST_KIND_EXTERNAL_RETRY,
                 }.get(turn.waiting_reason)
                 return (
                     request
-                    if request and request.request_type == expected_type
+                    if request and request.request_kind == expected_type
                     else None
                 )
         return None
@@ -438,7 +431,7 @@ class Task:
         self,
         max_pages: int,
         deadline: float,
-        on_event: Callable[[pb.OperatingThreadEvent], None] | None,
+        on_event: Callable[[pb.TaskEvent], None] | None,
     ) -> bool:
         for _ in range(max_pages):
             cursor = int(self._state["cursor"])
@@ -449,14 +442,14 @@ class Task:
             )
             if page.reset_required:
                 if (
-                    not page.HasField("thread_execution")
-                    or page.thread_execution.replay_cursor < cursor
+                    not page.HasField("snapshot")
+                    or page.snapshot.replay_cursor < cursor
                 ):
                     raise _protocol(
                         "Retention reset omitted a valid owner execution cursor"
                     )
                 self._event = None
-                self._state["cursor"] = str(page.thread_execution.replay_cursor)
+                self._state["cursor"] = str(page.snapshot.replay_cursor)
                 _application_call(self._save)
                 return (
                     True  # Re-fetch current owner state; reset events are not history.
@@ -489,7 +482,7 @@ class Task:
         poll_interval: float = 1,
         max_pages: int = 10,
         max_reconnect_attempts: int = 3,
-        on_event: Callable[[pb.OperatingThreadEvent], None] | None = None,
+        on_event: Callable[[pb.TaskEvent], None] | None = None,
         cancelled: Callable[[], bool] | None = None,
     ) -> TaskResult:
         """Bounded durable polling. Stopping observation never interrupts work."""
@@ -649,7 +642,7 @@ def _protocol(message: str) -> DeixicError:
     return DeixicError(message, kind="protocol")
 
 
-def _validate_page(page: pb.ListOperatingThreadEventsResponse, cursor: int) -> None:
+def _validate_page(page: pb.ListEventsResponse, cursor: int) -> None:
     expected = max([cursor] + [event.cursor for event in page.events])
     if page.next_cursor != expected or (page.has_more and expected <= cursor):
         raise _protocol("Event pagination returned an invalid watermark")

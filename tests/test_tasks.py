@@ -4,7 +4,7 @@ import json
 import time
 
 import pytest
-from console.v1 import console_pb2 as pb
+from deixic import protocol as pb
 from deixic import Deixic, DeixicError
 
 from test_client import FakeResponse, FakeTransport, response
@@ -23,10 +23,10 @@ def client(transport):
 
 
 def accepted():
-    return pb.SubmitOperatingMessageResponse(
-        replay_cursor=9_007_199_254_740_994,
-        accepted_turn=pb.OperatingThreadTurn(
-            turn_id="target", sequence=2, state=pb.OPERATING_TURN_STATE_QUEUED
+    return pb.SubmitTaskResponse(
+        replay_cursor=9007199254740994,
+        accepted_turn=pb.TaskTurn(
+            turn_id="target", sequence=2, state=pb.TURN_STATE_ACCEPTED
         ),
     )
 
@@ -74,47 +74,42 @@ def test_completed_result_fetches_exact_linked_message_and_receipts_across_pages
         [
             response(accepted()),
             response(
-                pb.GetOperatingThreadResponse(
-                    channel=pb.OperatingChannel(id="company"),
+                pb.GetThreadResponse(
                     next_page_token="older",
                     turns=[
-                        pb.OperatingThreadTurn(
+                        pb.TaskTurn(
                             turn_id="target",
                             sequence=2,
-                            state=pb.OPERATING_TURN_STATE_COMPLETED,
+                            state=pb.TURN_STATE_COMPLETED,
                             assistant_message_id="answer",
                         )
                     ],
                     messages=[
-                        pb.OperatingMessage(
+                        pb.TaskMessage(
                             id="other-answer",
-                            channel_id="company",
-                            role="assistant",
+                            role=pb.MESSAGE_ROLE_ASSISTANT,
                             body="Unrelated",
                         )
                     ],
+                    thread=pb.Thread(id="company"),
                 )
             ),
             response(
-                pb.GetOperatingThreadResponse(
-                    channel=pb.OperatingChannel(id="company"),
+                pb.GetThreadResponse(
                     messages=[
-                        pb.OperatingMessage(
+                        pb.TaskMessage(
                             id="answer",
-                            channel_id="company",
-                            role="assistant",
+                            role=pb.MESSAGE_ROLE_ASSISTANT,
                             body="Account brief",
                             receipt_ids=["evidence"],
                         )
                     ],
+                    thread=pb.Thread(id="company"),
                 )
             ),
             response(
-                pb.GetOperatingReceiptResponse(
-                    receipt=pb.OperatingReceipt(
-                        id="evidence",
-                        lifecycle_state=pb.RECEIPT_LIFECYCLE_STATE_VERIFIED,
-                    )
+                pb.GetReceiptResponse(
+                    receipt=pb.Receipt(id="evidence", state=pb.RECEIPT_STATE_VERIFIED)
                 )
             ),
         ]
@@ -141,15 +136,15 @@ def test_checkpoint_cannot_move_between_tenants_or_origins():
 def finished(**options):
     turn_options = options.pop("turn", {})
     message_options = options.pop("message", {})
-    return pb.GetOperatingThreadResponse(
-        channel=pb.OperatingChannel(id="company"),
+    return pb.GetThreadResponse(
+        thread=pb.Thread(id="company"),
         turns=[
-            pb.OperatingThreadTurn(
+            pb.TaskTurn(
                 **dict(
                     dict(
                         turn_id="target",
                         sequence=2,
-                        state=pb.OPERATING_TURN_STATE_COMPLETED,
+                        state=pb.TURN_STATE_COMPLETED,
                         assistant_message_id="answer",
                     ),
                     **turn_options,
@@ -157,12 +152,11 @@ def finished(**options):
             )
         ],
         messages=[
-            pb.OperatingMessage(
+            pb.TaskMessage(
                 **dict(
                     dict(
                         id="answer",
-                        channel_id="company",
-                        role="assistant",
+                        role=pb.MESSAGE_ROLE_ASSISTANT,
                         body="Account brief",
                     ),
                     **message_options,
@@ -179,15 +173,15 @@ def test_retention_reset_uses_owner_execution_cursor_and_ignores_reset_events():
         [
             response(accepted()),
             response(
-                pb.ListOperatingThreadEventsResponse(
+                pb.ListEventsResponse(
                     reset_required=True,
                     next_cursor=C + 9,
-                    thread_execution=pb.OperatingThreadExecution(replay_cursor=C + 2),
+                    snapshot=pb.Thread(replay_cursor=C + 2),
                     events=[
-                        pb.OperatingThreadEvent(
+                        pb.TaskEvent(
                             cursor=C + 9,
                             turn_id="target",
-                            kind=pb.OPERATING_THREAD_EVENT_KIND_TURN_COMPLETED,
+                            kind=pb.EVENT_KIND_TURN_COMPLETED,
                         )
                     ],
                 )
@@ -206,38 +200,35 @@ def test_reconnect_retries_observation_without_resubmitting():
         [
             response(accepted()),
             FakeResponse(503, b'{"code":"unavailable"}'),
-            response(pb.ListOperatingThreadEventsResponse(next_cursor=C)),
+            response(pb.ListEventsResponse(next_cursor=C)),
             response(finished()),
         ]
     )
     task = prepared(client(transport)).submit()
     assert task.wait(poll_interval=0.001).status == "completed"
     assert [item["url"].rsplit("/", 1)[-1] for item in transport.requests] == [
-        "SubmitOperatingMessage",
-        "ListOperatingThreadEvents",
-        "ListOperatingThreadEvents",
-        "GetOperatingThread",
+        "SubmitTask",
+        "ListEvents",
+        "ListEvents",
+        "GetThread",
     ]
 
 
 def test_progress_callback_gets_only_new_matching_events_and_cannot_forge_result():
-    own = pb.OperatingThreadEvent(
-        cursor=C + 2,
-        turn_id="target",
-        event_id="own",
-        kind=pb.OPERATING_THREAD_EVENT_KIND_PROGRESS,
+    own = pb.TaskEvent(
+        cursor=C + 2, turn_id="target", id="own", kind=pb.EVENT_KIND_PROGRESS
     )
     transport = FakeTransport(
         [
             response(accepted()),
             response(
-                pb.ListOperatingThreadEventsResponse(
+                pb.ListEventsResponse(
                     next_cursor=C + 2,
                     events=[
-                        pb.OperatingThreadEvent(
+                        pb.TaskEvent(
                             cursor=C + 1,
                             turn_id="another",
-                            kind=pb.OPERATING_THREAD_EVENT_KIND_TURN_COMPLETED,
+                            kind=pb.EVENT_KIND_TURN_COMPLETED,
                         ),
                         own,
                         own,
@@ -250,9 +241,9 @@ def test_progress_callback_gets_only_new_matching_events_and_cannot_forge_result
     events = []
 
     def progress(event):
-        events.append(event.event_id)
+        events.append(event.id)
         event.turn_id = "forged"
-        event.kind = pb.OPERATING_THREAD_EVENT_KIND_TURN_FAILED
+        event.kind = pb.EVENT_KIND_TURN_FAILED
 
     task = prepared(client(transport)).submit()
     result = task.wait(on_event=progress)
@@ -265,30 +256,26 @@ def test_progress_callback_gets_only_new_matching_events_and_cannot_forge_result
 def test_approval_request_is_recovered_from_owner_after_restart():
     saved_transport = FakeTransport([response(accepted())])
     saved = prepared(client(saved_transport)).submit().checkpoint()
-    request = pb.OperatingThreadEvent(
+    request = pb.TaskEvent(
         cursor=C - 1,
-        event_id="approval-event",
+        id="approval-event",
         turn_id="target",
-        kind=pb.OPERATING_THREAD_EVENT_KIND_APPROVAL_REQUIRED,
+        kind=pb.EVENT_KIND_APPROVAL_REQUIRED,
         request_id="approval-1",
-        request_type=pb.OPERATING_THREAD_REQUEST_TYPE_APPROVAL,
+        request_kind=pb.REQUEST_KIND_APPROVAL,
     )
     transport = FakeTransport(
         [
             response(
                 finished(
                     turn=dict(
-                        state=pb.OPERATING_TURN_STATE_WAITING,
-                        waiting_reason=pb.OPERATING_THREAD_WAITING_REASON_APPROVAL,
+                        state=pb.TURN_STATE_WAITING,
+                        waiting_reason=pb.WAITING_REASON_APPROVAL,
                         first_cursor=C - 3,
                     )
                 )
             ),
-            response(
-                pb.ListOperatingThreadEventsResponse(
-                    next_cursor=C - 1, events=[request]
-                )
-            ),
+            response(pb.ListEventsResponse(next_cursor=C - 1, events=[request])),
         ]
     )
     task = client(transport).tasks.resume(saved)
@@ -296,9 +283,7 @@ def test_approval_request_is_recovered_from_owner_after_restart():
     assert result.status == "waiting"
     assert result.event.request_id == "approval-1"
     assert result.body is None
-    request = pb.ListOperatingThreadEventsRequest.FromString(
-        transport.requests[1]["body"]
-    )
+    request = pb.ListEventsRequest.FromString(transport.requests[1]["body"])
     assert request.after_cursor == C - 4
     assert all("Submit" not in item["url"] for item in transport.requests)
 
@@ -310,12 +295,12 @@ def test_missing_retained_request_stays_waiting_without_inventing_approval():
             response(
                 finished(
                     turn=dict(
-                        state=pb.OPERATING_TURN_STATE_WAITING,
-                        waiting_reason=pb.OPERATING_THREAD_WAITING_REASON_APPROVAL,
+                        state=pb.TURN_STATE_WAITING,
+                        waiting_reason=pb.WAITING_REASON_APPROVAL,
                     )
                 )
             ),
-            response(pb.ListOperatingThreadEventsResponse(reset_required=True)),
+            response(pb.ListEventsResponse(reset_required=True)),
         ]
     )
     result = prepared(client(transport)).submit().result()
@@ -335,16 +320,12 @@ def test_completed_results_fail_closed_on_mismatched_owner_links(bad):
     if bad == "message_id":
         page.turns[0].assistant_message_id = "missing"
     if bad == "role":
-        page.messages[0].role = "user"
+        page.messages[0].role = pb.MESSAGE_ROLE_USER
     if bad == "channel":
-        page.messages[0].channel_id = "another"
+        page.thread.id = "another"
     if bad == "receipt":
         page.messages[0].receipt_ids.append("requested")
-        tail = [
-            response(
-                pb.GetOperatingReceiptResponse(receipt=pb.OperatingReceipt(id="wrong"))
-            )
-        ]
+        tail = [response(pb.GetReceiptResponse(receipt=pb.Receipt(id="wrong")))]
     transport = FakeTransport([response(accepted()), response(page), *tail])
     with pytest.raises(DeixicError) as error:
         prepared(client(transport)).submit().result()
@@ -354,10 +335,10 @@ def test_completed_results_fail_closed_on_mismatched_owner_links(bad):
 @pytest.mark.parametrize(
     "state,status",
     [
-        (pb.OPERATING_TURN_STATE_RESPONDED, "responded"),
-        (pb.OPERATING_TURN_STATE_FAILED, "failed"),
-        (pb.OPERATING_TURN_STATE_INTERRUPTED, "interrupted"),
-        (pb.OPERATING_TURN_STATE_RUNNING, "unfinished"),
+        (pb.TURN_STATE_RESPONDED, "responded"),
+        (pb.TURN_STATE_FAILED, "failed"),
+        (pb.TURN_STATE_INTERRUPTED, "interrupted"),
+        (pb.TURN_STATE_RUNNING, "unfinished"),
     ],
 )
 def test_noncompleted_owner_states_have_no_final_answer(state, status):
@@ -383,13 +364,11 @@ def test_storage_failure_prevents_submission_and_callback_failure_is_not_retried
         task.submit()
     assert not transport.requests
 
-    own = pb.OperatingThreadEvent(cursor=C + 1, turn_id="target", event_id="own")
+    own = pb.TaskEvent(cursor=C + 1, turn_id="target", id="own")
     transport = FakeTransport(
         [
             response(accepted()),
-            response(
-                pb.ListOperatingThreadEventsResponse(next_cursor=C + 1, events=[own])
-            ),
+            response(pb.ListEventsResponse(next_cursor=C + 1, events=[own])),
         ]
     )
     task = prepared(client(transport)).submit()
@@ -408,9 +387,7 @@ def test_cancelled_observation_does_not_interrupt_or_submit():
     assert len(transport.requests) == 1
 
 
-@pytest.mark.parametrize(
-    "cancel_on", ["ListOperatingThreadEvents", "GetOperatingThread"]
-)
+@pytest.mark.parametrize("cancel_on", ["ListEvents", "GetThread"])
 def test_cancellation_during_read_stops_observation_without_remote_mutation(cancel_on):
     class CancelDuringRead(FakeTransport):
         cancelled = False
@@ -424,16 +401,14 @@ def test_cancellation_during_read_stops_observation_without_remote_mutation(canc
     transport = CancelDuringRead(
         [
             response(accepted()),
-            response(pb.ListOperatingThreadEventsResponse(next_cursor=C)),
+            response(pb.ListEventsResponse(next_cursor=C)),
             response(finished()),
         ]
     )
     task = prepared(client(transport)).submit()
     outcome = task.wait(cancelled=lambda: transport.cancelled)
     assert outcome.status == "unfinished" and outcome.reason == "cancelled"
-    assert len(transport.requests) == (
-        2 if cancel_on == "ListOperatingThreadEvents" else 3
-    )
+    assert len(transport.requests) == (2 if cancel_on == "ListEvents" else 3)
     assert task.checkpoint()["submission"] == "accepted"
     assert all("Interrupt" not in item["url"] for item in transport.requests)
 
@@ -442,7 +417,7 @@ def test_cancellation_callback_failure_is_not_a_network_error():
     transport = FakeTransport(
         [
             response(accepted()),
-            response(pb.ListOperatingThreadEventsResponse(next_cursor=C)),
+            response(pb.ListEventsResponse(next_cursor=C)),
         ]
     )
     task = prepared(client(transport)).submit()
@@ -483,14 +458,14 @@ def test_deadline_caps_read_timeout_and_returns_recoverable_checkpoint():
 @pytest.mark.parametrize(
     "page",
     [
-        pb.ListOperatingThreadEventsResponse(next_cursor=C + 2),
-        pb.ListOperatingThreadEventsResponse(next_cursor=C, has_more=True),
-        pb.ListOperatingThreadEventsResponse(reset_required=True),
-        pb.ListOperatingThreadEventsResponse(
+        pb.ListEventsResponse(next_cursor=C + 2),
+        pb.ListEventsResponse(next_cursor=C, has_more=True),
+        pb.ListEventsResponse(reset_required=True),
+        pb.ListEventsResponse(
             next_cursor=C + 1,
             events=[
-                pb.OperatingThreadEvent(cursor=C + 1, turn_id="target", event_id="a"),
-                pb.OperatingThreadEvent(cursor=C + 1, turn_id="target", event_id="b"),
+                pb.TaskEvent(cursor=C + 1, turn_id="target", id="a"),
+                pb.TaskEvent(cursor=C + 1, turn_id="target", id="b"),
             ],
         ),
     ],
@@ -529,22 +504,11 @@ def test_setup_returns_owner_requirements_without_claiming_write_access():
     transport = FakeTransport(
         [
             response(
-                pb.GetOperatingThreadResponse(
-                    channel=pb.OperatingChannel(id="company"),
-                    capabilities=[
-                        pb.OperatingCapabilityState(
-                            service="crm",
-                            status="unavailable",
-                            missing_requirements=["Connect CRM"],
-                            missing_requirement_states=[
-                                pb.OperatingCapabilityRequirementState(
-                                    service="crm",
-                                    reason_code="connection_missing",
-                                    remediation_ref="settings/integrations",
-                                )
-                            ],
-                        )
-                    ],
+                pb.GetThreadResponse(
+                    thread=pb.Thread(id="company"),
+                    setup=pb.SetupReadiness(
+                        missing_requirements=["Connect CRM"], accessible=True
+                    ),
                 )
             )
         ]
@@ -552,10 +516,7 @@ def test_setup_returns_owner_requirements_without_claiming_write_access():
     report = client(transport).tasks.check_setup(channel_id="company")
     assert report.status == "needs_attention"
     assert report.write_access == "not_checked"
-    assert (
-        report.capabilities[0].missing_requirement_states[0].reason_code
-        == "connection_missing"
-    )
+    assert report.capabilities[0].missing_requirements[0] == "Connect CRM"
     assert len(transport.requests) == 1
 
 
@@ -577,13 +538,13 @@ def test_setup_reports_owner_model_availability_without_inventing_a_route():
     transport = FakeTransport(
         [
             response(
-                pb.GetOperatingThreadResponse(
-                    channel=pb.OperatingChannel(id="company"),
-                    default_model=pb.InferenceProviderTarget(
-                        provider="fixture",
-                        model="chosen",
-                        ready=False,
-                        unavailable_reason="grant_missing",
+                pb.GetThreadResponse(
+                    thread=pb.Thread(id="company"),
+                    setup=pb.SetupReadiness(
+                        default_model=pb.AvailableModel(
+                            provider="fixture", model="chosen", ready=False
+                        ),
+                        accessible=True,
                     ),
                 )
             )
@@ -591,18 +552,18 @@ def test_setup_reports_owner_model_availability_without_inventing_a_route():
     )
     report = client(transport).tasks.check_setup(channel_id="company")
     assert report.status == "needs_attention"
-    assert report.default_model.unavailable_reason == "grant_missing"
+    assert report.default_model.ready is False
     assert report.model_selection is None
 
 
 @pytest.mark.parametrize("explicit_selection", [False, True])
 def test_setup_rejects_an_absent_execution_route(explicit_selection):
-    response_body = pb.GetOperatingThreadResponse(
-        channel=pb.OperatingChannel(id="company")
+    response_body = pb.GetThreadResponse(
+        thread=pb.Thread(id="company"), setup=pb.SetupReadiness(accessible=True)
     )
     if explicit_selection:
-        response_body.model_selection.CopyFrom(
-            pb.OperatingModelSelection(provider="fixture", model="removed")
+        response_body.setup.selection.CopyFrom(
+            pb.ModelSelection(provider="fixture", model="removed")
         )
     transport = FakeTransport([response(response_body)])
     report = client(transport).tasks.check_setup(channel_id="company")
@@ -615,9 +576,9 @@ def test_wait_continues_past_preliminary_response_until_owner_completion():
     transport = FakeTransport(
         [
             response(accepted()),
-            response(pb.ListOperatingThreadEventsResponse(next_cursor=C)),
-            response(finished(turn=dict(state=pb.OPERATING_TURN_STATE_RESPONDED))),
-            response(pb.ListOperatingThreadEventsResponse(next_cursor=C)),
+            response(pb.ListEventsResponse(next_cursor=C)),
+            response(finished(turn=dict(state=pb.TURN_STATE_RESPONDED))),
+            response(pb.ListEventsResponse(next_cursor=C)),
             response(finished()),
         ]
     )
@@ -639,19 +600,20 @@ def test_selected_ready_model_is_not_blocked_by_unavailable_default():
     transport = FakeTransport(
         [
             response(
-                pb.GetOperatingThreadResponse(
-                    channel=pb.OperatingChannel(id="company"),
-                    default_model=pb.InferenceProviderTarget(
-                        provider="fixture", model="default", ready=False
+                pb.GetThreadResponse(
+                    thread=pb.Thread(id="company"),
+                    setup=pb.SetupReadiness(
+                        default_model=pb.AvailableModel(
+                            provider="fixture", model="default", ready=False
+                        ),
+                        selection=pb.ModelSelection(provider="fixture", model="chosen"),
+                        available_models=[
+                            pb.AvailableModel(
+                                provider="fixture", model="chosen", ready=True
+                            )
+                        ],
+                        accessible=True,
                     ),
-                    model_selection=pb.OperatingModelSelection(
-                        provider="fixture", model="chosen"
-                    ),
-                    available_models=[
-                        pb.InferenceProviderTarget(
-                            provider="fixture", model="chosen", ready=True
-                        )
-                    ],
                 )
             )
         ]
@@ -673,7 +635,7 @@ def test_result_parser_failure_propagates_without_changing_completion():
 
 
 def test_invalid_acceptance_stays_unacknowledged_and_requires_explicit_replay():
-    transport = FakeTransport([response(pb.SubmitOperatingMessageResponse())])
+    transport = FakeTransport([response(pb.SubmitTaskResponse())])
     task = prepared(client(transport))
     with pytest.raises(DeixicError) as error:
         task.submit()

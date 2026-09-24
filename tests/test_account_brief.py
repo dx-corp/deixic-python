@@ -12,7 +12,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import pytest
-from console.v1 import console_pb2 as pb
+from deixic import protocol as pb
 
 
 C = 9_007_199_254_740_994
@@ -36,23 +36,23 @@ def owner(*, lose_acceptance=False, state=None):
             method = self.path.rsplit("/", 1)[-1]
             body = self.rfile.read(int(self.headers["Content-Length"]))
             try:
-                assert self.path.startswith("/deixic.v1.DeixicService/")
+                assert self.path.startswith("/deixicpublic.v1.DeixicPublicService/")
                 assert self.headers["Content-Type"] == "application/proto"
                 assert self.headers["Connect-Protocol-Version"] == "1"
                 assert self.headers["Authorization"] == "Bearer fixture-secret"
                 request = getattr(pb, method + "Request").FromString(body)
                 assert (
-                    request.query.organization_id
+                    request.scope.organization_id
                     == self.headers["X-Organization-ID"]
                     == "org-fixture"
                 )
                 assert (
-                    request.query.workspace_id
+                    request.scope.workspace_id
                     == self.headers["X-Workspace-ID"]
                     == "ws-fixture"
                 )
-                assert request.channel_id == "company"
-                if method == "SubmitOperatingMessage":
+                assert request.thread_id == "company"
+                if method == "SubmitTask":
                     submissions.append(body)
                     key = request.idempotency_key
                     assert key == "crm-event-001"
@@ -66,15 +66,13 @@ def owner(*, lose_acceptance=False, state=None):
                         self.connection.shutdown(socket.SHUT_RDWR)
                         self.connection.close()
                         return
-                    message = pb.SubmitOperatingMessageResponse(
+                    message = pb.SubmitTaskResponse(
                         replay_cursor=C,
-                        accepted_turn=pb.OperatingThreadTurn(
-                            turn_id="target",
-                            sequence=2,
-                            state=pb.OPERATING_TURN_STATE_QUEUED,
+                        accepted_turn=pb.TaskTurn(
+                            turn_id="target", sequence=2, state=pb.TURN_STATE_ACCEPTED
                         ),
                     )
-                elif method == "ListOperatingThreadEvents":
+                elif method == "ListEvents":
                     if state.get("block_read"):
                         state["read_started"].set()
                         state["release_read"].wait(5)
@@ -86,71 +84,66 @@ def owner(*, lose_acceptance=False, state=None):
                     completed = (
                         not state.get("waiting") or state.get("decision") == "approve"
                     )
-                    message = pb.ListOperatingThreadEventsResponse(
+                    message = pb.ListEventsResponse(
                         next_cursor=C + 1
                         if completed
                         or (
                             state.get("waiting")
-                            and not state.get("decision")
+                            and (not state.get("decision"))
                             and state.get("request_visible", True)
                         )
                         else request.after_cursor,
                         events=[
-                            pb.OperatingThreadEvent(
+                            pb.TaskEvent(
                                 cursor=C + 1,
                                 turn_id="target",
-                                event_id="completed",
-                                kind=pb.OPERATING_THREAD_EVENT_KIND_TURN_COMPLETED,
+                                id="completed",
+                                kind=pb.EVENT_KIND_TURN_COMPLETED,
                             )
                         ]
                         if completed and request.after_cursor < C + 1
                         else [
-                            pb.OperatingThreadEvent(
+                            pb.TaskEvent(
                                 cursor=C + 1,
                                 turn_id="target",
-                                event_id="approval",
-                                kind=pb.OPERATING_THREAD_EVENT_KIND_APPROVAL_REQUIRED,
+                                id="approval",
+                                kind=pb.EVENT_KIND_APPROVAL_REQUIRED,
                                 request_id="approval-1",
-                                request_call_id="call-1",
-                                request_type=pb.OPERATING_THREAD_REQUEST_TYPE_APPROVAL,
+                                call_id="call-1",
+                                request_kind=pb.REQUEST_KIND_APPROVAL,
                             )
                         ]
                         if state.get("waiting")
-                        and not state.get("decision")
+                        and (not state.get("decision"))
                         and state.get("request_visible", True)
-                        and request.after_cursor < C + 1
+                        and (request.after_cursor < C + 1)
                         else [],
                     )
-                elif method == "GetOperatingThread":
-                    message = pb.GetOperatingThreadResponse(
-                        channel=pb.OperatingChannel(id="company"),
-                        default_model=pb.InferenceProviderTarget(
-                            provider="fixture", model="fixture", ready=True
-                        ),
+                elif method == "GetThread":
+                    message = pb.GetThreadResponse(
                         turns=[
-                            pb.OperatingThreadTurn(
+                            pb.TaskTurn(
                                 turn_id="target",
                                 sequence=2,
-                                state=pb.OPERATING_TURN_STATE_COMPLETED
+                                state=pb.TURN_STATE_COMPLETED
                                 if completed
-                                else pb.OPERATING_TURN_STATE_FAILED
+                                else pb.TURN_STATE_FAILED
                                 if state.get("decision") == "deny"
-                                else pb.OPERATING_TURN_STATE_WAITING
+                                else pb.TURN_STATE_WAITING
                                 if state.get("waiting")
-                                else pb.OPERATING_TURN_STATE_QUEUED,
-                                waiting_reason=pb.OPERATING_THREAD_WAITING_REASON_APPROVAL
+                                else pb.TURN_STATE_ACCEPTED,
+                                waiting_reason=pb.WAITING_REASON_APPROVAL
                                 if state.get("waiting")
-                                else pb.OPERATING_THREAD_WAITING_REASON_NONE,
+                                else pb.WAITING_REASON_UNSPECIFIED,
                                 first_cursor=C,
                                 last_cursor=C + 1,
                                 assistant_message_id="answer" if completed else "",
                             )
                         ],
                         messages=[
-                            pb.OperatingMessage(
+                            pb.TaskMessage(
                                 id="answer",
-                                channel_id="company",
-                                role="assistant",
+                                role=pb.MESSAGE_ROLE_ASSISTANT,
                                 body=state.get(
                                     "body", "Example account: an evidence-linked brief"
                                 ),
@@ -159,26 +152,27 @@ def owner(*, lose_acceptance=False, state=None):
                         ]
                         if completed
                         else [],
-                    )
-                elif method == "GetOperatingReceipt":
-                    assert request.receipt_id == "evidence"
-                    message = pb.GetOperatingReceiptResponse(
-                        receipt=pb.OperatingReceipt(
-                            id="evidence",
-                            lifecycle_state=state.get(
-                                "receipt_state", pb.RECEIPT_LIFECYCLE_STATE_VERIFIED
+                        thread=pb.Thread(id="company"),
+                        setup=pb.SetupReadiness(
+                            default_model=pb.AvailableModel(
+                                provider="fixture", model="fixture", ready=True
                             ),
-                            owner_service="crm",
-                            object_id="account-1",
+                            accessible=True,
+                        ),
+                    )
+                elif method == "GetReceipt":
+                    assert request.receipt_id == "evidence"
+                    message = pb.GetReceiptResponse(
+                        receipt=pb.Receipt(
+                            id="evidence",
                             kind="crm.update",
-                            evidence_refs=[
-                                pb.RelatedResource(
-                                    id="change-1", resource_type="crm-change"
-                                )
+                            state=state.get("receipt_state", pb.RECEIPT_STATE_VERIFIED),
+                            evidence=[
+                                pb.EvidenceReference(id="change-1", kind="crm-change")
                             ],
                         )
                     )
-                elif method == "RespondOperatingThread":
+                elif method == "RespondToRequest":
                     if state.get("forbidden_decision"):
                         self.send_response(403)
                         self.send_header("Content-Type", "application/json")
@@ -189,26 +183,22 @@ def owner(*, lose_acceptance=False, state=None):
                         return
                     assert state.get("waiting") and not state.get("decision")
                     assert request.turn_id == "target"
-                    assert request.response.request_id == "approval-1"
-                    assert request.response.call_id == "call-1"
-                    assert (
-                        request.response.request_type
-                        == pb.OPERATING_THREAD_REQUEST_TYPE_APPROVAL
-                    )
+                    assert request.request_id == "approval-1"
+                    assert request.call_id == "call-1"
+                    assert request.request_kind == pb.REQUEST_KIND_APPROVAL
                     assert (
                         request.idempotency_key
-                        == request.response.idempotency_key
+                        == request.idempotency_key
                         == "decision-001"
                     )
                     state["decisions"].append(body)
                     state["decision"] = (
                         "approve"
-                        if request.response.action
-                        == pb.OPERATING_THREAD_RESPONSE_ACTION_APPROVE
+                        if request.action == pb.RESPONSE_ACTION_APPROVE
                         else "deny"
                     )
                     completed = state["decision"] == "approve"
-                    message = pb.RespondOperatingThreadResponse(replay_cursor=C + 2)
+                    message = pb.RespondToRequestResponse(replay_cursor=C + 2)
                 else:
                     raise AssertionError("unexpected mutation or RPC: " + method)
             except Exception as error:
@@ -350,9 +340,9 @@ def test_typescript_checkpoint_recovers_in_python_without_duplicate_operation(
     )
     compiled = sdk_root / "typescript/dist/sdk/deixic/typescript/src/index.js"
     if explicit_script:
-        assert script.is_file() and shutil.which("node"), (
-            "Configured TypeScript example is unavailable"
-        )
+        assert script.is_file() and shutil.which(
+            "node"
+        ), "Configured TypeScript example is unavailable"
     elif not shutil.which("node") or not compiled.is_file():
         pytest.skip("Build the TypeScript SDK to run cross-language checkpoint proof")
     with owner(lose_acceptance=lose_acceptance) as (
