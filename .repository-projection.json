@@ -3,11 +3,11 @@
   "projection": "deixic-python",
   "projectionSchemaVersion": 1,
   "sourceRepository": "dx-corp/mono",
-  "sourceSha": "53a87ef3a96f42ee4cbc1e526865c44db3be67d4",
+  "sourceSha": "0405bd95fc12ed2ca79294c8a91340aec60f7f17",
   "destinationRepository": "dx-corp/deixic-python",
-  "priorProjectedBase": "0a21b0036e8c0c3c87558b9c1552929407941257",
+  "priorProjectedBase": "eb985878931dd34dff75c6c2b66842a4935fef74",
   "definitionDigest": "a08894fef955ed05eb80364e12a13492935e74fe431cc8a43fa7797977ec33a1",
   "toolDigest": "898e8657d9153a2a51d7c283bf83bb3350b5d1e6",
-  "contentDigest": "a933d07916a70e43c8d48593efa3c2d571567396e8c530927fe57f2ca726c92e",
+  "contentDigest": "b7b726f51a8f88e1af14aa24cc527e29a57150872dd507569926eacc55ba632f",
   "publicationEligible": true
 }
