@@ -8,7 +8,7 @@ import os
 import sys
 from pathlib import Path
 
-from console.v1 import console_pb2 as pb
+from deixic import protocol as pb
 from deixic import Deixic, DeixicError
 
 from .task_result import save
@@ -85,12 +85,7 @@ def main() -> int:
                         next_action=check.next_action,
                         requirements=[
                             dict(
-                                service=item.service,
                                 missing_requirements=list(item.missing_requirements),
-                                reason_codes=[
-                                    reason.reason_code
-                                    for reason in item.missing_requirement_states
-                                ],
                             )
                             for item in check.capabilities
                         ],
@@ -137,7 +132,7 @@ def main() -> int:
                 if (
                     outcome.status != "waiting"
                     or event is None
-                    or event.request_type != pb.OPERATING_THREAD_REQUEST_TYPE_APPROVAL
+                    or event.request_kind != pb.REQUEST_KIND_APPROVAL
                     or event.request_id != args.request
                 ):
                     print(
@@ -152,13 +147,13 @@ def main() -> int:
                 client.controls.respond(
                     channel_id=task.checkpoint()["channelId"],
                     turn_id=outcome.turn_id,
-                    response=pb.OperatingThreadResponse(
+                    response=pb.RespondToRequestRequest(
                         request_id=event.request_id,
-                        call_id=event.request_call_id,
-                        request_type=event.request_type,
-                        action=pb.OPERATING_THREAD_RESPONSE_ACTION_APPROVE
+                        call_id=event.call_id,
+                        request_kind=event.request_kind,
+                        action=pb.RESPONSE_ACTION_APPROVE
                         if args.action == "approve"
-                        else pb.OPERATING_THREAD_RESPONSE_ACTION_DENY,
+                        else pb.RESPONSE_ACTION_DENY,
                     ),
                     idempotency_key=args.decision_key,
                 )
@@ -179,7 +174,7 @@ def main() -> int:
                         print(
                             json.dumps(
                                 dict(
-                                    event_id=event.event_id,
+                                    id=event.id,
                                     turn_id=event.turn_id,
                                     kind=event.kind,
                                 )
@@ -218,22 +213,20 @@ def main() -> int:
                 actions = [
                     dict(
                         id=item.id,
-                        owner_service=item.owner_service,
-                        object_id=item.object_id,
                         kind=item.kind,
-                        lifecycle_state=item.lifecycle_state,
+                        lifecycle_state=item.state,
                         evidence_refs=[
-                            dict(resource_type=ref.resource_type, id=ref.id)
-                            for ref in item.evidence_refs
+                            dict(resource_type=ref.kind, id=ref.id)
+                            for ref in item.evidence
                         ],
                     )
                     for item in outcome.receipts
                 ]
                 attention = any(
-                    item.lifecycle_state
+                    item.state
                     not in (
-                        pb.RECEIPT_LIFECYCLE_STATE_SUCCEEDED,
-                        pb.RECEIPT_LIFECYCLE_STATE_VERIFIED,
+                        pb.RECEIPT_STATE_SUCCEEDED,
+                        pb.RECEIPT_STATE_VERIFIED,
                     )
                     for item in outcome.receipts
                 )
@@ -255,10 +248,10 @@ def main() -> int:
                             request_id=outcome.event.request_id
                             if outcome.event
                             else None,
-                            request_type=outcome.event.request_type
+                            request_kind=outcome.event.request_kind
                             if outcome.event
                             else None,
-                            error_code=outcome.turn.error_code
+                            error_code=outcome.turn.terminal_error.code
                             if outcome.turn
                             else None,
                         )

@@ -8,7 +8,7 @@ import subprocess
 import threading
 
 import pytest
-from console.v1 import console_pb2 as pb
+from deixic import protocol as pb
 
 from test_account_brief import command, configuration, invocation, owner
 from deixic.examples.account_brief_result import FORMAT_INSTRUCTION, parse_account_brief
@@ -73,11 +73,11 @@ def test_structured_application_result_and_action_outcomes(tmp_path, language, f
     state = dict(
         body="not JSON" if fault == "invalid_answer" else json.dumps(brief),
         disconnect_read=fault == "read_disconnect",
-        receipt_state=pb.RECEIPT_LIFECYCLE_STATE_FAILED
+        receipt_state=pb.RECEIPT_STATE_FAILED
         if fault == "failed_action"
-        else pb.RECEIPT_LIFECYCLE_STATE_UNAVAILABLE
+        else pb.RECEIPT_STATE_UNAVAILABLE
         if fault == "unavailable_action"
-        else pb.RECEIPT_LIFECYCLE_STATE_VERIFIED,
+        else pb.RECEIPT_STATE_VERIFIED,
     )
     with owner(state=state) as (url, operations, submissions, errors):
         env = configuration(url)
@@ -103,11 +103,10 @@ def test_structured_application_result_and_action_outcomes(tmp_path, language, f
         if result["status"] == "completed":
             assert result["brief"] == brief
             actions = result["actions"]
+            assert actions[0]["id"] == "evidence"
+            assert actions[0]["kind"] == "crm.update"
             assert (
-                actions[0].get("owner_service", actions[0].get("ownerService")) == "crm"
-            )
-            assert (
-                actions[0].get("object_id", actions[0].get("objectId")) == "account-1"
+                "owner_service" not in actions[0] and "ownerService" not in actions[0]
             )
             assert (
                 actions[0].get("lifecycle_state", actions[0].get("lifecycleState"))

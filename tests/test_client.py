@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from typing import Any
 
 import pytest
-from console.v1 import console_pb2
+from deixic import protocol as public_pb2
 
 from deixic import Credential, Deixic, DeixicError
 
@@ -94,12 +94,9 @@ def test_send_uses_binary_connect_and_fixed_scope() -> None:
     transport = FakeTransport(
         [
             response(
-                console_pb2.SubmitOperatingMessageResponse(
+                public_pb2.SubmitTaskResponse(
                     replay_cursor=8,
-                    accepted_turn=console_pb2.OperatingThreadTurn(
-                        turn_id="turn-1",
-                        sequence=2,
-                    ),
+                    accepted_turn=public_pb2.TaskTurn(turn_id="turn-1", sequence=2),
                 )
             )
         ]
@@ -120,20 +117,20 @@ def test_send_uses_binary_connect_and_fixed_scope() -> None:
 
     assert result.accepted_turn.turn_id == "turn-1"
     request = transport.requests[0]
-    assert request["url"].endswith("/deixic.v1.DeixicService/SubmitOperatingMessage")
+    assert request["url"].endswith("/deixicpublic.v1.DeixicPublicService/SubmitTask")
     assert request["headers"]["Content-Type"] == "application/proto"
     assert request["headers"]["Authorization"] == "Bearer sdk-test-key"
     assert request["headers"]["X-Organization-ID"] == "org-a"
     assert request["headers"]["X-Workspace-ID"] == "workspace-a"
-    decoded = console_pb2.SubmitOperatingMessageRequest.FromString(request["body"])
-    assert decoded.query.organization_id == "org-a"
-    assert decoded.query.workspace_id == "workspace-a"
+    decoded = public_pb2.SubmitTaskRequest.FromString(request["body"])
+    assert decoded.scope.organization_id == "org-a"
+    assert decoded.scope.workspace_id == "workspace-a"
     assert decoded.idempotency_key == "send-1"
 
 
 @pytest.mark.parametrize("field", ["organization_id", "workspace_id"])
 def test_client_scope_cannot_be_reassigned_or_deleted(field: str) -> None:
-    transport = FakeTransport([response(console_pb2.GetOperatingThreadResponse())])
+    transport = FakeTransport([response(public_pb2.GetThreadResponse())])
     client = Deixic(
         api_key="sdk-test-key",
         organization_id="org-a",
@@ -148,9 +145,9 @@ def test_client_scope_cannot_be_reassigned_or_deleted(field: str) -> None:
 
     client.threads.get(channel_id="company")
     request = transport.requests[0]
-    decoded = console_pb2.GetOperatingThreadRequest.FromString(request["body"])
-    assert decoded.query.organization_id == "org-a"
-    assert decoded.query.workspace_id == "workspace-a"
+    decoded = public_pb2.GetThreadRequest.FromString(request["body"])
+    assert decoded.scope.organization_id == "org-a"
+    assert decoded.scope.workspace_id == "workspace-a"
     assert request["headers"]["X-Organization-ID"] == "org-a"
     assert request["headers"]["X-Workspace-ID"] == "workspace-a"
 
@@ -161,9 +158,7 @@ def test_authentication_refresh_preserves_request_bytes_and_identity() -> None:
         b'{"code":"unauthenticated","message":"expired"}',
         {"content-type": "application/json"},
     )
-    transport = FakeTransport(
-        [first, response(console_pb2.InterruptOperatingThreadResponse())]
-    )
+    transport = FakeTransport([first, response(public_pb2.InterruptTaskResponse())])
     credentials = RotatingCredentials(
         Credential(
             access_token="new-token",
@@ -253,7 +248,7 @@ def test_rejected_refresh_does_not_poison_later_credential_reads() -> None:
         401, b'{"code":"unauthenticated"}', {"content-type": "application/json"}
     )
     transport = FakeTransport(
-        [first, response(console_pb2.GetOperatingThreadResponse(replay_cursor=4))]
+        [first, response(public_pb2.GetThreadResponse(replay_cursor=4))]
     )
     credentials = RotatingCredentials(
         original=Credential(
@@ -284,10 +279,8 @@ def test_rejected_refresh_does_not_poison_later_credential_reads() -> None:
 
 
 def test_watch_decodes_bounded_connect_stream_frames() -> None:
-    first = console_pb2.WatchOperatingThreadResponse(next_cursor=4)
-    second = console_pb2.WatchOperatingThreadResponse(
-        next_cursor=8, reset_required=True
-    )
+    first = public_pb2.WatchEventsResponse(next_cursor=4)
+    second = public_pb2.WatchEventsResponse(next_cursor=8, reset_required=True)
     frames = b"".join(
         [
             _frame(first.SerializeToString(deterministic=True)),
@@ -320,8 +313,8 @@ def test_watch_decodes_bounded_connect_stream_frames() -> None:
     request_body = transport.requests[0]["body"]
     assert request_body[0] == 0
     assert struct.unpack(">I", request_body[1:5])[0] == len(request_body) - 5
-    request = console_pb2.WatchOperatingThreadRequest.FromString(request_body[5:])
-    assert request.channel_id == "company"
+    request = public_pb2.WatchEventsRequest.FromString(request_body[5:])
+    assert request.thread_id == "company"
 
 
 def test_mutations_require_caller_idempotency_before_transport() -> None:
@@ -340,7 +333,7 @@ def test_mutations_require_caller_idempotency_before_transport() -> None:
 
 
 def test_default_origin_is_the_deployed_deixic_api() -> None:
-    transport = FakeTransport([response(console_pb2.GetOperatingThreadResponse())])
+    transport = FakeTransport([response(public_pb2.GetThreadResponse())])
     client = Deixic(
         api_key="sdk-test-key",
         organization_id="org-a",
@@ -403,16 +396,25 @@ def _frame(payload: bytes, *, flags: int = 0) -> bytes:
 @pytest.mark.parametrize(
     "chunks",
     [
-        (_frame(console_pb2.WatchOperatingThreadResponse(next_cursor=4).SerializeToString()),),
+        (_frame(public_pb2.WatchEventsResponse(next_cursor=4).SerializeToString()),),
         (_frame(b"", flags=2),),
         (_frame(b"[]", flags=2),),
         (_frame(b'{"error":{}}', flags=2),),
         (_frame(b"{}", flags=2) + b"extra",),
         (_frame(b"{}", flags=2), b"extra"),
     ],
-    ids=["missing-end", "empty-end", "non-object-end", "empty-error", "trailing-buffer", "trailing-chunk"],
+    ids=[
+        "missing-end",
+        "empty-end",
+        "non-object-end",
+        "empty-error",
+        "trailing-buffer",
+        "trailing-chunk",
+    ],
 )
-def test_watch_rejects_truncated_or_corrupt_stream_end(chunks: tuple[bytes, ...]) -> None:
+def test_watch_rejects_truncated_or_corrupt_stream_end(
+    chunks: tuple[bytes, ...],
+) -> None:
     stream_response = FakeResponse(
         200,
         headers={"content-type": "application/connect+proto"},
@@ -435,8 +437,13 @@ def test_watch_rejects_truncated_or_corrupt_stream_end(chunks: tuple[bytes, ...]
 def test_watch_preserves_server_error_from_end_envelope() -> None:
     stream_response = FakeResponse(
         200,
-        headers={"content-type": "application/connect+proto", "x-request-id": "request-1"},
-        chunks=(_frame(b'{"error":{"code":"unavailable","message":"retry"}}', flags=2),),
+        headers={
+            "content-type": "application/connect+proto",
+            "x-request-id": "request-1",
+        },
+        chunks=(
+            _frame(b'{"error":{"code":"unavailable","message":"retry"}}', flags=2),
+        ),
     )
     client = Deixic(
         api_key="sdk-test-key",
@@ -491,22 +498,96 @@ def test_client_reports_invalid_auth_configuration_as_typed_validation(
 
 
 def test_coding_submission_preserves_explicit_acceptance_and_declares_kind() -> None:
-    transport = FakeTransport([FakeResponse(200, console_pb2.SubmitOperatingMessageResponse().SerializeToString())])
-    client = Deixic(api_key="test-key", organization_id="org-a", workspace_id="workspace-a", transport=transport)
-    contract = console_pb2.CodingAcceptanceContract(repository_id="fixture", generation=1,
-        required_assertion_ids=["sum"], require_review=True, require_behavior=True, readiness_requirements=["test"])
-    client.messages.send(channel_id="coding", body="Implement fixture", idempotency_key="coding-1", coding_acceptance=contract)
-    request = console_pb2.SubmitOperatingMessageRequest.FromString(transport.requests[0]["body"])
-    assert request.coding_acceptance == contract
-    assert request.task_kind == console_pb2.OPERATING_TASK_KIND_CODING_IMPLEMENTATION
+    transport = FakeTransport(
+        [FakeResponse(200, public_pb2.SubmitTaskResponse().SerializeToString())]
+    )
+    client = Deixic(
+        api_key="test-key",
+        organization_id="org-a",
+        workspace_id="workspace-a",
+        transport=transport,
+    )
+    contract = public_pb2.CodingContract(
+        repository_id="fixture",
+        generation=1,
+        required_assertion_ids=["sum"],
+        require_review=True,
+        require_behavior=True,
+        readiness_requirements=["test"],
+    )
+    client.messages.send(
+        channel_id="coding",
+        body="Implement fixture",
+        idempotency_key="coding-1",
+        coding_acceptance=contract,
+    )
+    request = public_pb2.SubmitTaskRequest.FromString(transport.requests[0]["body"])
+    assert request.coding_contract == contract
 
 
 @pytest.mark.parametrize("include_content", [False, True])
-def test_coding_output_content_requires_explicit_receipt_read(include_content: bool) -> None:
-    transport = FakeTransport([FakeResponse(200, console_pb2.GetOperatingReceiptResponse().SerializeToString())])
-    client = Deixic(api_key="test-key", organization_id="org-a", workspace_id="workspace-a", transport=transport)
-    client.receipts.get(channel_id="coding", receipt_id="receipt-1", include_coding_output_content=include_content)
-    request = console_pb2.GetOperatingReceiptRequest.FromString(transport.requests[0]["body"])
+def test_coding_output_content_requires_explicit_receipt_read(
+    include_content: bool,
+) -> None:
+    transport = FakeTransport(
+        [FakeResponse(200, public_pb2.GetReceiptResponse().SerializeToString())]
+    )
+    client = Deixic(
+        api_key="test-key",
+        organization_id="org-a",
+        workspace_id="workspace-a",
+        transport=transport,
+    )
+    client.receipts.get(
+        channel_id="coding",
+        receipt_id="receipt-1",
+        include_coding_output_content=include_content,
+    )
+    request = public_pb2.GetReceiptRequest.FromString(transport.requests[0]["body"])
     assert request.include_coding_output_content == include_content
-    assert request.query.organization_id == "org-a"
-    assert request.query.workspace_id == "workspace-a"
+    assert request.scope.organization_id == "org-a"
+    assert request.scope.workspace_id == "workspace-a"
+
+
+def test_public_response_preserves_scope_and_turn_coordinates():
+    transport = FakeTransport([response(public_pb2.RespondToRequestResponse())])
+    client = Deixic(
+        api_key="fixture",
+        organization_id="org-a",
+        workspace_id="workspace-a",
+        transport=transport,
+    )
+    client.controls.respond(
+        channel_id="thread-a",
+        turn_id="turn-a",
+        idempotency_key="decision-a",
+        response=public_pb2.RespondToRequestRequest(
+            scope=public_pb2.Scope(organization_id="other", workspace_id="other"),
+            thread_id="other",
+            turn_id="other",
+            request_id="request-a",
+            request_kind=1,
+            action=1,
+        ),
+    )
+    request = public_pb2.RespondToRequestRequest.FromString(
+        transport.requests[0]["body"]
+    )
+    assert request.scope.organization_id == "org-a"
+    assert request.scope.workspace_id == "workspace-a"
+    assert request.thread_id == "thread-a"
+    assert request.turn_id == "turn-a"
+    assert request.request_id == "request-a"
+
+
+def test_unsupported_offset_fails_before_transport():
+    transport = FakeTransport([])
+    client = Deixic(
+        api_key="fixture",
+        organization_id="org-a",
+        workspace_id="workspace-a",
+        transport=transport,
+    )
+    with pytest.raises(DeixicError):
+        client.threads.get(channel_id="thread-a", offset=1)
+    assert not transport.requests

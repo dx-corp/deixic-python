@@ -7,7 +7,7 @@ from collections.abc import Iterator
 from typing import Any, TypeVar
 from urllib.parse import urlsplit
 
-from console.v1 import console_pb2
+from deixic import protocol as public_pb2
 from google.protobuf.message import Message
 
 from .auth import (
@@ -26,7 +26,7 @@ from .transport import RequestsTransport, Response, Transport
 
 MessageT = TypeVar("MessageT", bound=Message)
 
-_SERVICE = "deixic.v1.DeixicService"
+_SERVICE = "deixicpublic.v1.DeixicPublicService"
 _MAX_STREAM_FRAME_BYTES = 16 * 1024 * 1024
 
 
@@ -89,13 +89,10 @@ class Deixic:
         """Platform origin fixed when this client was created."""
         return self._base_url
 
-    def _query(self, *, limit: int = 50, offset: int = 0) -> console_pb2.ConsoleQuery:
-        return console_pb2.ConsoleQuery(
+    def _scope(self) -> public_pb2.Scope:
+        return public_pb2.Scope(
             organization_id=self.organization_id,
             workspace_id=self.workspace_id,
-            environment="production",
-            limit=limit,
-            offset=offset,
         )
 
     def _unary(
@@ -205,19 +202,19 @@ class ThreadsClient:
         offset: int = 0,
         page_token: str = "",
         timeout: float | None = None,
-    ) -> console_pb2.GetOperatingThreadResponse:
+    ) -> public_pb2.GetThreadResponse:
         _bounded_int(limit, "limit", minimum=1, maximum=200)
-        _bounded_int(offset, "offset", minimum=0, maximum=2_147_483_647)
-        request = console_pb2.GetOperatingThreadRequest(
-            query=self._client._query(limit=limit, offset=offset),
-            channel_id=_required(channel_id, "channel_id"),
+        _bounded_int(offset, "offset", minimum=0, maximum=0)
+        request = public_pb2.GetThreadRequest(
+            scope=self._client._scope(),
+            thread_id=_required(channel_id, "channel_id"),
             limit=limit,
             page_token=page_token,
         )
         return self._client._unary(
-            "GetOperatingThread",
+            "GetThread",
             request,
-            console_pb2.GetOperatingThreadResponse,
+            public_pb2.GetThreadResponse,
             timeout=timeout,
         )
 
@@ -233,19 +230,19 @@ class EventsClient:
         after_cursor: int,
         limit: int = 200,
         timeout: float | None = None,
-    ) -> console_pb2.ListOperatingThreadEventsResponse:
+    ) -> public_pb2.ListEventsResponse:
         _bounded_int(after_cursor, "after_cursor", minimum=0, maximum=2**63 - 1)
         _bounded_int(limit, "limit", minimum=1, maximum=200)
-        request = console_pb2.ListOperatingThreadEventsRequest(
-            query=self._client._query(),
-            channel_id=_required(channel_id, "channel_id"),
+        request = public_pb2.ListEventsRequest(
+            scope=self._client._scope(),
+            thread_id=_required(channel_id, "channel_id"),
             after_cursor=after_cursor,
             limit=limit,
         )
         return self._client._unary(
-            "ListOperatingThreadEvents",
+            "ListEvents",
             request,
-            console_pb2.ListOperatingThreadEventsResponse,
+            public_pb2.ListEventsResponse,
             timeout=timeout,
         )
 
@@ -254,17 +251,17 @@ class EventsClient:
         *,
         channel_id: str,
         after_cursor: int,
-    ) -> Iterator[console_pb2.WatchOperatingThreadResponse]:
+    ) -> Iterator[public_pb2.WatchEventsResponse]:
         _bounded_int(after_cursor, "after_cursor", minimum=0, maximum=2**63 - 1)
-        request = console_pb2.WatchOperatingThreadRequest(
-            query=self._client._query(),
-            channel_id=_required(channel_id, "channel_id"),
+        request = public_pb2.WatchEventsRequest(
+            scope=self._client._scope(),
+            thread_id=_required(channel_id, "channel_id"),
             after_cursor=after_cursor,
         )
         return self._client._stream(
-            "WatchOperatingThread",
+            "WatchEvents",
             request,
-            console_pb2.WatchOperatingThreadResponse,
+            public_pb2.WatchEventsResponse,
         )
 
 
@@ -281,27 +278,26 @@ class MessagesClient:
         continuation_task_id: str = "",
         reference_task_ids: tuple[str, ...] | list[str] = (),
         project_resource_id: str | None = None,
-        coding_acceptance: console_pb2.CodingAcceptanceContract | None = None,
-    ) -> console_pb2.SubmitOperatingMessageResponse:
-        request = console_pb2.SubmitOperatingMessageRequest(
-            query=self._client._query(),
-            channel_id=_required(channel_id, "channel_id"),
+        coding_acceptance: public_pb2.CodingContract | None = None,
+    ) -> public_pb2.SubmitTaskResponse:
+        request = public_pb2.SubmitTaskRequest(
+            scope=self._client._scope(),
+            thread_id=_required(channel_id, "channel_id"),
             body=body,
             idempotency_key=_required(idempotency_key, "idempotency_key"),
             continuation_task_id=continuation_task_id,
             reference_task_ids=list(reference_task_ids),
         )
         if coding_acceptance is not None:
-            request.coding_acceptance.CopyFrom(coding_acceptance)
-            request.task_kind = console_pb2.OPERATING_TASK_KIND_CODING_IMPLEMENTATION
+            request.coding_contract.CopyFrom(coding_acceptance)
         if project_resource_id is not None:
             request.project_resource_id = _required(
                 project_resource_id, "project_resource_id"
             )
         return self._client._unary(
-            "SubmitOperatingMessage",
+            "SubmitTask",
             request,
-            console_pb2.SubmitOperatingMessageResponse,
+            public_pb2.SubmitTaskResponse,
         )
 
 
@@ -316,18 +312,18 @@ class ControlsClient:
         idempotency_key: str,
         turn_id: str = "",
         reason: str = "",
-    ) -> console_pb2.InterruptOperatingThreadResponse:
-        request = console_pb2.InterruptOperatingThreadRequest(
-            query=self._client._query(),
-            channel_id=_required(channel_id, "channel_id"),
+    ) -> public_pb2.InterruptTaskResponse:
+        request = public_pb2.InterruptTaskRequest(
+            scope=self._client._scope(),
+            thread_id=_required(channel_id, "channel_id"),
             turn_id=turn_id,
             idempotency_key=_required(idempotency_key, "idempotency_key"),
             reason=reason,
         )
         return self._client._unary(
-            "InterruptOperatingThread",
+            "InterruptTask",
             request,
-            console_pb2.InterruptOperatingThreadResponse,
+            public_pb2.InterruptTaskResponse,
         )
 
     def respond(
@@ -335,28 +331,33 @@ class ControlsClient:
         *,
         channel_id: str,
         turn_id: str,
-        response: console_pb2.OperatingThreadResponse,
+        response: public_pb2.RespondToRequestRequest,
         idempotency_key: str,
-    ) -> console_pb2.RespondOperatingThreadResponse:
+    ) -> public_pb2.RespondToRequestResponse:
         key = _required(idempotency_key, "idempotency_key")
-        response_copy = console_pb2.OperatingThreadResponse()
+        response_copy = public_pb2.RespondToRequestRequest()
         response_copy.CopyFrom(response)
         if response_copy.idempotency_key and response_copy.idempotency_key != key:
             raise validation_error(
                 "response.idempotency_key must match idempotency_key"
             )
         response_copy.idempotency_key = key
-        request = console_pb2.RespondOperatingThreadRequest(
-            query=self._client._query(),
-            channel_id=_required(channel_id, "channel_id"),
+        request = public_pb2.RespondToRequestRequest(
+            scope=self._client._scope(),
+            thread_id=_required(channel_id, "channel_id"),
             turn_id=_required(turn_id, "turn_id"),
-            response=response_copy,
+            request_id=response_copy.request_id,
+            request_kind=response_copy.request_kind,
+            action=response_copy.action,
+            call_id=response_copy.call_id,
+            text=response_copy.text,
+            is_error=response_copy.is_error,
             idempotency_key=key,
         )
         return self._client._unary(
-            "RespondOperatingThread",
+            "RespondToRequest",
             request,
-            console_pb2.RespondOperatingThreadResponse,
+            public_pb2.RespondToRequestResponse,
         )
 
 
@@ -371,17 +372,17 @@ class ReceiptsClient:
         receipt_id: str,
         include_coding_output_content: bool = False,
         timeout: float | None = None,
-    ) -> console_pb2.GetOperatingReceiptResponse:
-        request = console_pb2.GetOperatingReceiptRequest(
-            query=self._client._query(),
-            channel_id=_required(channel_id, "channel_id"),
+    ) -> public_pb2.GetReceiptResponse:
+        request = public_pb2.GetReceiptRequest(
+            scope=self._client._scope(),
+            thread_id=_required(channel_id, "channel_id"),
             receipt_id=_required(receipt_id, "receipt_id"),
             include_coding_output_content=include_coding_output_content,
         )
         return self._client._unary(
-            "GetOperatingReceipt",
+            "GetReceipt",
             request,
-            console_pb2.GetOperatingReceiptResponse,
+            public_pb2.GetReceiptResponse,
             timeout=timeout,
         )
 
@@ -389,19 +390,19 @@ class ReceiptsClient:
         self,
         *,
         receipt_id: str,
-        action: console_pb2.OperatingReceiptAction,
+        action: public_pb2.ReceiptAction,
         idempotency_key: str,
-    ) -> console_pb2.ResolveOperatingReceiptActionResponse:
-        request = console_pb2.ResolveOperatingReceiptActionRequest(
-            query=self._client._query(),
+    ) -> public_pb2.ResolveReceiptActionResponse:
+        request = public_pb2.ResolveReceiptActionRequest(
+            scope=self._client._scope(),
             receipt_id=_required(receipt_id, "receipt_id"),
-            action=action,
+            action_id=_required(action.id, "action.id"),
             idempotency_key=_required(idempotency_key, "idempotency_key"),
         )
         return self._client._unary(
-            "ResolveOperatingReceiptAction",
+            "ResolveReceiptAction",
             request,
-            console_pb2.ResolveOperatingReceiptActionResponse,
+            public_pb2.ResolveReceiptActionResponse,
         )
 
 

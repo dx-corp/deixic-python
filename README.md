@@ -272,3 +272,17 @@ local projection with its supplied snapshot and authoritative
 `thread_execution.replay_cursor`. `deixic.events.watch()` yields bounded protobuf pages from one
 server stream; the caller decides reconnection and resumes from the last saved
 cursor.
+
+## Public protocol boundary
+
+This package includes only the `deixicpublic.v1.DeixicPublicService` contract
+and its standard protobuf dependencies. Read responses expose public thread,
+message, event, setup, and receipt projections. Receipt evidence uses public
+resource references; service ownership and internal execution records are not
+part of this contract. Pagination uses page tokens.
+
+Existing `deixic.task.v1` checkpoints remain readable, including accepted turn
+IDs and decimal-string cursors. Their `channelId` identifies the public thread.
+Python message types are available from `deixic.protocol`; TypeScript exports
+public message types and schemas from the package root. Existing TypeScript
+operating-type names are aliases of these public types.
