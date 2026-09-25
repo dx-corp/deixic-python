@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Add `WorkloadFederationCredentialProvider` with GitHub Actions, file, and
+  environment-variable assertion sources for keyless workload authentication.
 - Report missing or removed model routes during setup instead of declaring the
   workspace accessible, and preserve plain-text account briefs when account
   names contain structured-output instruction text. Keep rejected credential
