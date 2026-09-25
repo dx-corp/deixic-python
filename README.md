@@ -219,6 +219,77 @@ provide a `CredentialProvider`; an authentication replay is allowed only when
 the refreshed credential retains the same subject, tenant, and declared
 scopes.
 
+## Workload federation
+
+A CI job or cloud workload can authenticate without a stored API key. An
+organization admin first registers an issuer, a service account, and a rule in
+Identity settings, as described in the
+[workload federation guide](https://github.com/dx-corp/mono/blob/main/docs/services/identity/workload-federation.md).
+The workload then exchanges a signed assertion from its platform for a Deixic
+access token that lasts at most 300 seconds:
+
+```python
+import os
+
+from deixic import (
+    Deixic,
+    WorkloadFederationCredentialProvider,
+    github_actions_assertion_source,
+)
+
+identity_url = os.environ["DEIXIC_IDENTITY_URL"]
+credentials = WorkloadFederationCredentialProvider(
+    identity_url=identity_url,
+    assertion_source=github_actions_assertion_source(
+        audience=f"{identity_url}/v1/workload-federation/exchange",
+    ),
+)
+deixic = Deixic(
+    credential_provider=credentials,
+    organization_id="org_123",
+    workspace_id="ws_456",
+)
+```
+
+The provider exchanges an assertion on the first request and caches the token.
+It exchanges again 60 seconds before expiry (`refresh_margin`) and after an
+HTTP 401 from Deixic. Identity accepts each assertion once, so every exchange
+calls the assertion source for a new assertion. The provider refuses to send
+an assertion it has already exchanged and raises `DeixicError` with code
+`workload_assertion_reused`. When an early refresh cannot obtain a new
+assertion and the cached token has not expired, the provider keeps using the
+cached token.
+
+Assertion sources:
+
+- `github_actions_assertion_source(audience)` requests a new OIDC token from
+  GitHub Actions on each call. The job needs `permissions: id-token: write`.
+- `file_assertion_source(path)` reads a file on each call, such as a Kubernetes
+  projected service-account token. The kubelet rewrites that file after 80% of
+  the token's `expirationSeconds`. A file token can therefore be exchanged once
+  per rotation. Set `expirationSeconds` so that rotation happens more often
+  than the 300-second Deixic token lifetime, or pass a callable that requests
+  a new token from the Kubernetes TokenRequest API.
+- `environment_assertion_source(name)` reads an environment variable on each
+  call. The application must write a new value before each exchange.
+- Any zero-argument callable that returns a new JWT string.
+
+Exchange failures raise `DeixicError`:
+
+| HTTP status | `kind` | `code` | Retried |
+| --- | --- | --- | --- |
+| 400 | `validation` | `workload_assertion_invalid` | No |
+| 403 | `authorization` | `workload_federation_forbidden` | No |
+| 409 | `conflict` | `workload_assertion_replayed` | No |
+| 503 | `unavailable` | `workload_federation_unavailable` | Yes |
+| Transport failure | `transport` | `workload_exchange_transport` | Yes |
+
+A retry waits `retry_delay` seconds, doubled on each attempt, up to
+`max_attempts` total attempts (default 3). Each retry uses a new assertion.
+A 403 means no active rule matched the assertion's issuer, audience, subject,
+and claims. The provider never logs the assertion or the access token and
+omits both from error messages.
+
 ## Coding output readback
 
 `messages.send(coding_acceptance=contract)` sends the typed coding contract and
