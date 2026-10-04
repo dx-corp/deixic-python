@@ -642,3 +642,33 @@ def test_invalid_acceptance_stays_unacknowledged_and_requires_explicit_replay():
     assert error.value.kind == "protocol"
     assert task.result().status == "unacknowledged"
     assert len(transport.requests) == 1
+
+
+def test_v2_checkpoint_retains_blend_through_loss_restart_and_mutation():
+    class LostResponse(FakeTransport):
+        def send(self, *args, **kwargs):
+            result = super().send(*args, **kwargs)
+            if len(self.requests) == 1:
+                raise ConnectionError("lost response")
+            return result
+    transport = LostResponse([response(pb.SubmitVoicedTaskResponse(result=accepted())), response(pb.SubmitVoicedTaskResponse(result=accepted()))])
+    selected = pb.VoiceSelection(mode=2, voice_ids=["lead", "support"], tone_adjustments=[3])
+    checkpoints = []
+    def save(value):
+        checkpoints.append(json.loads(json.dumps(value)))
+        value["voiceSelection"]["voiceIds"].reverse()
+    task = prepared(client(transport), voice_selection=selected, on_checkpoint=save)
+    selected.voice_ids.reverse()
+    task.checkpoint()["voiceSelection"]["voiceIds"].reverse()
+    with pytest.raises(DeixicError):
+        task.submit()
+    saved = checkpoints[-1]
+    resumed = client(transport).tasks.resume(json.loads(json.dumps(saved)))
+    saved["voiceSelection"]["voiceIds"].reverse()
+    resumed.replay()
+    assert resumed.checkpoint()["schema"] == "deixic.task.v2"
+    assert transport.requests[0]["body"] == transport.requests[1]["body"]
+    assert list(pb.SubmitVoicedTaskRequest.FromString(transport.requests[1]["body"]).voice_selection.voice_ids) == ["lead", "support"]
+    for corrupted in [dict(resumed.checkpoint(), schema="deixic.task.v1"), dict(resumed.checkpoint(), voiceSelection={"mode": 2, "voiceIds": ["a", "a"], "toneAdjustments": []})]:
+        with pytest.raises(DeixicError):
+            client(transport).tasks.resume(corrupted)

@@ -357,3 +357,28 @@ IDs and decimal-string cursors. Their `channelId` identifies the public thread.
 Python message types are available from `deixic.protocol`; TypeScript exports
 public message types and schemas from the package root. Existing TypeScript
 operating-type names are aliases of these public types.
+
+
+## Brand voices
+
+`voices.list()` reads active voice IDs and display metadata for this client's fixed workspace.
+Guidance remains with the Settings owner. Select up to four IDs in order; the first leads.
+Explicit selections use `SubmitVoicedTask`, which older servers refuse before acceptance.
+Ordinary submissions continue to use `SubmitTask` and the workspace default.
+
+Tasks prepared with an explicit selection use the shared `deixic.task.v2` checkpoint.
+It retains the IDs and tone adjustments across restart and explicit replay with the same
+idempotency key. Existing `deixic.task.v1` checkpoints retain their original request.
+Do not change an uncertain request's selection; start a separate logical request instead.
+
+```python
+from deixic import protocol as pb
+catalog = deixic.voices.list()
+task = deixic.tasks.prepare(
+    channel_id="company", body="Draft the update", idempotency_key="update-1",
+    voice_selection=pb.VoiceSelection(mode=pb.VOICE_MODE_BRAND_VOICE,
+        voice_ids=["brand", "customer-care"], tone_adjustments=[pb.VOICE_TONE_WARMER]),
+    on_checkpoint=save_checkpoint,
+)
+task.submit()
+```

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from copy import deepcopy
 import math
 import random
 import time
@@ -22,8 +23,8 @@ MessageT = TypeVar("MessageT", bound=Message)
 MAX_CURSOR = 2**63 - 1
 
 
-class TaskCheckpoint(TypedDict):
-    schema: Literal["deixic.task.v1"]
+class _TaskCheckpointBase(TypedDict):
+    schema: Literal["deixic.task.v1", "deixic.task.v2"]
     organizationId: str
     workspaceId: str
     baseUrl: str
@@ -35,6 +36,10 @@ class TaskCheckpoint(TypedDict):
     turnId: str
     sequence: str
     cursor: str
+
+
+class TaskCheckpoint(_TaskCheckpointBase, total=False):
+    voiceSelection: dict[str, Any]
 
 
 @dataclass(frozen=True)
@@ -90,6 +95,7 @@ class TasksClient:
         body: str,
         idempotency_key: str,
         project_resource_id: str = "",
+        voice_selection: pb.VoiceSelection | None = None,
         on_checkpoint: Callable[[TaskCheckpoint], None] | None = None,
     ) -> Task:
         state: TaskCheckpoint = dict(
@@ -108,6 +114,9 @@ class TasksClient:
             sequence="0",
             cursor="0",
         )
+        if voice_selection is not None:
+            state["schema"] = "deixic.task.v2"
+            state["voiceSelection"] = _voice_checkpoint(voice_selection)
         task = Task(self._client, state, on_checkpoint)
         task._save()
         return task
@@ -119,6 +128,7 @@ class TasksClient:
         body: str,
         idempotency_key: str,
         project_resource_id: str = "",
+        voice_selection: pb.VoiceSelection | None = None,
         on_checkpoint: Callable[[TaskCheckpoint], None] | None = None,
     ) -> Task:
         """Prepare and submit once. Use on_checkpoint for restart recovery."""
@@ -127,6 +137,7 @@ class TasksClient:
             body=body,
             idempotency_key=idempotency_key,
             project_resource_id=project_resource_id,
+            voice_selection=voice_selection,
             on_checkpoint=on_checkpoint,
         ).submit()
 
@@ -137,12 +148,17 @@ class TasksClient:
         on_checkpoint: Callable[[TaskCheckpoint], None] | None = None,
     ) -> Task:
         # A checkpoint supplies coordinates, never authorization or completion.
-        keys = TaskCheckpoint.__required_keys__
+        keys = {"schema", "organizationId", "workspaceId", "baseUrl", "channelId", "body",
+                "idempotencyKey", "projectResourceId", "submission", "turnId", "sequence", "cursor"}
+        if isinstance(checkpoint, Mapping) and checkpoint.get("schema") == "deixic.task.v2":
+            keys.add("voiceSelection")
         if not isinstance(checkpoint, Mapping) or set(checkpoint) != keys:
             raise validation_error("Invalid task checkpoint fields")
-        state = dict(checkpoint)
-        if state["schema"] != "deixic.task.v1":
+        state = deepcopy(dict(checkpoint))
+        if state["schema"] not in ("deixic.task.v1", "deixic.task.v2"):
             raise validation_error("Unsupported task checkpoint schema")
+        if state["schema"] == "deixic.task.v2":
+            state["voiceSelection"] = _voice_checkpoint(_voice_from_checkpoint(state["voiceSelection"]))
         if (state["organizationId"], state["workspaceId"], state["baseUrl"]) != (
             self._client.organization_id,
             self._client.workspace_id,
@@ -241,7 +257,7 @@ class Task:
         if on_checkpoint is not None and not callable(on_checkpoint):
             raise validation_error("on_checkpoint must be callable")
         self._client = client
-        self._state = cast(TaskCheckpoint, dict(state))
+        self._state = cast(TaskCheckpoint, deepcopy(state))
         self._on_checkpoint = on_checkpoint
         self._event: pb.TaskEvent | None = None
         self._submitting = False
@@ -249,7 +265,7 @@ class Task:
 
     def checkpoint(self) -> TaskCheckpoint:
         """JSON-safe coordinates and original request; excludes credentials."""
-        return cast(TaskCheckpoint, dict(self._state))
+        return cast(TaskCheckpoint, deepcopy(self._state))
 
     def _save(self) -> None:
         if self._on_checkpoint:
@@ -276,6 +292,8 @@ class Task:
                 body=self._state["body"],
                 idempotency_key=self._state["idempotencyKey"],
                 project_resource_id=self._state["projectResourceId"] or None,
+                **({"voice_selection": _voice_from_checkpoint(self._state["voiceSelection"])}
+                   if self._state["schema"] == "deixic.task.v2" else {}),
             )
             turn = accepted.accepted_turn
             if (
@@ -654,3 +672,26 @@ def _validate_page(page: pb.ListEventsResponse, cursor: int) -> None:
         if event.cursor in records and records[event.cursor] != encoded:
             raise _protocol("Different events reused the same cursor")
         records[event.cursor] = encoded
+
+
+def _voice_checkpoint(value: pb.VoiceSelection) -> dict[str, Any]:
+    from .client import normalize_voice_selection
+    selected = normalize_voice_selection(value)
+    return {"mode": selected.mode, "voiceIds": list(selected.voice_ids),
+            "toneAdjustments": list(selected.tone_adjustments)}
+
+
+def _voice_from_checkpoint(value: Any) -> pb.VoiceSelection:
+    if (not isinstance(value, dict) or set(value) != {"mode", "voiceIds", "toneAdjustments"}
+        or type(value["mode"]) is not int or not isinstance(value["voiceIds"], list)
+        or not isinstance(value["toneAdjustments"], list)
+        or len(value["voiceIds"]) > 4 or len(value["toneAdjustments"]) > 3
+        or any(not isinstance(item, str) for item in value["voiceIds"])
+        or any(type(item) is not int for item in value["toneAdjustments"])):
+        raise validation_error("Invalid checkpoint voice selection")
+    try:
+        from .client import normalize_voice_selection
+        return normalize_voice_selection(pb.VoiceSelection(
+            mode=value["mode"], voice_ids=value["voiceIds"], tone_adjustments=value["toneAdjustments"]))
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise validation_error("Invalid checkpoint voice selection") from exc

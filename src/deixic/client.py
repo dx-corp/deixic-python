@@ -68,6 +68,7 @@ class Deixic:
         self.threads = ThreadsClient(self)
         self.events = EventsClient(self)
         self.messages = MessagesClient(self)
+        self.voices = VoicesClient(self)
         self.controls = ControlsClient(self)
         self.receipts = ReceiptsClient(self)
         from .tasks import TasksClient
@@ -279,6 +280,7 @@ class MessagesClient:
         reference_task_ids: tuple[str, ...] | list[str] = (),
         project_resource_id: str | None = None,
         coding_acceptance: public_pb2.CodingContract | None = None,
+        voice_selection: public_pb2.VoiceSelection | None = None,
     ) -> public_pb2.SubmitTaskResponse:
         request = public_pb2.SubmitTaskRequest(
             scope=self._client._scope(),
@@ -294,6 +296,17 @@ class MessagesClient:
             request.project_resource_id = _required(
                 project_resource_id, "project_resource_id"
             )
+        if voice_selection is not None:
+            # Snapshot before credential callbacks; a 401 replays identical bytes.
+            selection = normalize_voice_selection(voice_selection)
+            result = self._client._unary(
+                "SubmitVoicedTask",
+                public_pb2.SubmitVoicedTaskRequest(task=request, voice_selection=selection),
+                public_pb2.SubmitVoicedTaskResponse,
+            )
+            if not result.HasField("result"):
+                raise DeixicError("Voiced submission omitted its result", kind="protocol")
+            return result.result
         return self._client._unary(
             "SubmitTask",
             request,
@@ -523,3 +536,29 @@ def _bounded_int(value: int, field: str, *, minimum: int, maximum: int) -> None:
         raise validation_error(
             f"{field} must be an integer between {minimum} and {maximum}"
         )
+
+
+class VoicesClient:
+    def __init__(self, client: Deixic) -> None:
+        self._client = client
+
+    def list(self) -> public_pb2.GetVoiceCatalogResponse:
+        result = self._client._unary(
+            "GetVoiceCatalog", public_pb2.GetVoiceCatalogRequest(scope=self._client._scope()),
+            public_pb2.GetVoiceCatalogResponse,
+        )
+        if result.scope != self._client._scope():
+            raise DeixicError("Voice catalog belongs to a different workspace", kind="protocol")
+        return result
+
+
+def normalize_voice_selection(value: public_pb2.VoiceSelection) -> public_pb2.VoiceSelection:
+    if not isinstance(value, public_pb2.VoiceSelection):
+        raise validation_error("Invalid voice selection")
+    ids, tones = list(value.voice_ids), list(value.tone_adjustments)
+    if (value.mode not in (0, 1, 2, 3) or len(ids) > 4 or len(ids) != len(set(ids))
+        or any(not item or item != item.strip() or len(item) > 128 for item in ids)
+        or (not ids if value.mode == 2 else bool(ids))
+        or len(tones) > 3 or any(tone not in (1, 2, 3) for tone in tones)):
+        raise validation_error("Invalid voice IDs or tone adjustments")
+    return public_pb2.VoiceSelection(mode=value.mode, voice_ids=ids, tone_adjustments=sorted(set(tones)))

@@ -591,3 +591,51 @@ def test_unsupported_offset_fails_before_transport():
     with pytest.raises(DeixicError):
         client.threads.get(channel_id="thread-a", offset=1)
     assert not transport.requests
+
+
+def test_explicit_blend_is_frozen_before_credentials_and_uses_distinct_rpc():
+    selected = public_pb2.VoiceSelection(mode=2, voice_ids=["lead", "support"], tone_adjustments=[3, 1])
+    class MutatingCredentials:
+        can_refresh = False
+        def get_credential(self):
+            selected.voice_ids.reverse()
+            return Credential(access_token="fixture")
+    transport = FakeTransport([response(public_pb2.SubmitVoicedTaskResponse(result=public_pb2.SubmitTaskResponse(accepted_turn=public_pb2.TaskTurn(turn_id="voiced", sequence=1))))])
+    sdk = Deixic(organization_id="org-a", workspace_id="workspace-a", credential_provider=MutatingCredentials(), transport=transport)
+    assert sdk.messages.send(channel_id="company", body="draft", idempotency_key="voice-key", voice_selection=selected).accepted_turn.turn_id == "voiced"
+    request = public_pb2.SubmitVoicedTaskRequest.FromString(transport.requests[0]["body"])
+    assert transport.requests[0]["url"].endswith("/SubmitVoicedTask")
+    assert list(request.voice_selection.voice_ids) == ["lead", "support"]
+    assert list(request.voice_selection.tone_adjustments) == [1, 3]
+    assert request.task.idempotency_key == "voice-key"
+
+
+def test_voice_catalog_scope_and_selection_bounds():
+    transport = FakeTransport([response(public_pb2.GetVoiceCatalogResponse(scope=public_pb2.Scope(organization_id="other", workspace_id="workspace-a")))])
+    sdk = Deixic(organization_id="org-a", workspace_id="workspace-a", api_key="fixture", transport=transport)
+    with pytest.raises(DeixicError, match="different workspace"):
+        sdk.voices.list()
+    for selected in [public_pb2.VoiceSelection(mode=2), public_pb2.VoiceSelection(mode=2, voice_ids=["a", "a"]), public_pb2.VoiceSelection(mode=3, voice_ids=["a"]), public_pb2.VoiceSelection(mode=99)]:
+        with pytest.raises(DeixicError):
+            sdk.messages.send(channel_id="company", body="draft", idempotency_key="key", voice_selection=selected)
+    assert len(transport.requests) == 1
+
+
+def test_voiced_authentication_replays_identical_bytes_and_old_server_never_falls_back():
+    selected = public_pb2.VoiceSelection(mode=2, voice_ids=["lead", "support"])
+    class MutatingRefresh(RotatingCredentials):
+        def refresh_credential(self, current):
+            selected.voice_ids.reverse()
+            return super().refresh_credential(current)
+    transport = FakeTransport([FakeResponse(401, b'{"code":"unauthenticated"}'), response(public_pb2.SubmitVoicedTaskResponse(result=public_pb2.SubmitTaskResponse(accepted_turn=public_pb2.TaskTurn(turn_id="turn", sequence=1))))])
+    credentials = MutatingRefresh(Credential(access_token="new", subject="subject-a", organization_id="org-a", workspace_id="workspace-a", scopes=("console:write",)))
+    sdk = Deixic(organization_id="org-a", workspace_id="workspace-a", credential_provider=credentials, transport=transport)
+    sdk.messages.send(channel_id="company", body="draft", idempotency_key="key", voice_selection=selected)
+    assert transport.requests[0]["body"] == transport.requests[1]["body"]
+    assert all(request["url"].endswith("/SubmitVoicedTask") for request in transport.requests)
+    old = FakeTransport([FakeResponse(404, b'{"code":"unimplemented"}')])
+    sdk = Deixic(organization_id="org-a", workspace_id="workspace-a", api_key="fixture", transport=old)
+    with pytest.raises(DeixicError):
+        sdk.messages.send(channel_id="company", body="draft", idempotency_key="key", voice_selection=public_pb2.VoiceSelection(mode=3))
+    assert len(old.requests) == 1
+    assert old.requests[0]["url"].endswith("/SubmitVoicedTask")
